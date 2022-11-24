@@ -1,14 +1,19 @@
 [package]
-name = "vulk"
+name = "vulkano_examples"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bytemuck = "1.12.3"
+gltf = { version = "1.0.0", features = ["extras", "names", "import"] }
+nalgebra-glm = { version = "0.17.0", features = ["convert-bytemuck", "default"] }
+rand = "0.8.5"
 vulkano = "0.32.0"
 vulkano-shaders = "0.32.0"
-bytemuck = "1.12.3"
+vulkano-win = "0.32.0"
+winit = "0.27.5"
 
 [profile.dev]
 opt-level = 1
