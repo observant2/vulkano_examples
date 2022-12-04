@@ -2,18 +2,18 @@ use nalgebra_glm::{Mat4, rotate_x, rotate_y, rotate_z, translate, Vec3, vec3};
 
 pub struct Camera {
     view_matrix: Mat4,
+    perspective_matrix: Mat4,
     pub position: Vec3,
     pub rotation: Vec3,
-    pub zoom: f32,
 }
 
 impl Camera {
-    pub fn new(position: Vec3, zoom: f32) -> Self {
+    pub fn new(position: Vec3, perspective: Mat4) -> Self {
         let mut camera = Camera {
             position,
             rotation: vec3(0.0, 0.0, 0.0),
-            zoom,
             view_matrix: Mat4::identity(),
+            perspective_matrix: perspective,
         };
         camera.update_view_matrix();
 
@@ -29,7 +29,7 @@ impl Camera {
 
         let trans_matrix = translate(&Mat4::identity(), &self.position);
 
-        self.view_matrix = trans_matrix * rot_matrix * Mat4::from_diagonal_element(self.zoom);
+        self.view_matrix = trans_matrix * rot_matrix;
     }
 
     pub fn get_rotation(&self) -> Vec3 {
@@ -40,12 +40,15 @@ impl Camera {
         self.position += delta;
     }
 
-    pub fn zoom(&mut self, delta: f32) {
-        self.zoom += delta;
-    }
-
     pub fn get_view_matrix(&self) -> Mat4 {
         self.view_matrix
+    }
+
+    pub fn get_perspective_matrix(&self) -> Mat4 {
+        let mut m = self.perspective_matrix;
+        m[(1, 1)] *= -1.0;
+
+        m
     }
 
     pub fn set_rotation(&mut self, rotation: Vec3) {

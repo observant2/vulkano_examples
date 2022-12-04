@@ -1,16 +1,13 @@
+use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
-use gltf::{Document, Semantic};
-use gltf::accessor::Dimensions;
-use gltf::buffer::Data;
-use gltf::json::accessor::ComponentType;
-use nalgebra_glm::{identity, Mat4, perspective, vec3, Vec4, vec4};
-use rand::Rng;
+use ktx::KtxInfo;
+use nalgebra_glm::{identity, Mat4, perspective, rotate, scale, translate, vec3, Vec3, Vec4, vec4};
 use vulkano_examples::{App};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassContents};
 use vulkano::device::Device;
 
 use vulkano::memory::allocator::StandardMemoryAllocator;
@@ -28,7 +25,10 @@ use vulkano::{swapchain, sync};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::format::{ClearValue, Format};
+use vulkano::image::{ImageDimensions, ImmutableImage, MipmapsCount};
+use vulkano::image::view::ImageView;
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
+use vulkano::sampler::{Sampler, SamplerCreateInfo};
 use winit::event::{ElementState, Event, KeyboardInput, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event::DeviceEvent::{Button, MouseMotion};
 use winit::event::WindowEvent::MouseWheel;
@@ -39,26 +39,67 @@ use vulkano_examples::gltf_loader::Model;
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
-struct UBO {
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub uv: [f32; 2],
+}
+
+vulkano::impl_vertex!(Vertex, position, uv);
+
+struct Cube {
+    matrices: Matrices,
+    rotation: Vec3,
+    descriptor_set: Option<Arc<PersistentDescriptorSet>>,
+    buffer: Option<Arc<CpuAccessibleBuffer<Matrices>>>,
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone, Zeroable, Pod)]
+struct Matrices {
     projection: Mat4,
     view: Mat4,
     model: Mat4,
 }
 
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-struct SpherePushConstantData {
-    color: Vec4,
-    position: Vec4,
+struct Example {
+    model: Model,
+    cubes: [Cube; 2],
 }
 
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-pub struct Vertex {
-    pub position: [f32; 3],
-}
+impl Example {
+    fn new(camera: &Camera) -> Self {
+        let model = Model::load("./assets/models/cube.gltf");
 
-vulkano::impl_vertex!(Vertex, position);
+        let cube1 = Cube {
+            matrices: Matrices {
+                model: identity(),
+                view: camera.get_view_matrix(),
+                projection: camera.get_perspective_matrix(),
+            },
+            rotation: Vec3::zeros(),
+            descriptor_set: None,
+            buffer: None,
+        };
+
+        println!("model matrix: {:?}", cube1.matrices.model);
+
+        let cube2 = Cube {
+            matrices: Matrices {
+                model: identity(),
+                view: camera.get_view_matrix(),
+                projection: camera.get_perspective_matrix(),
+            },
+            rotation: Vec3::zeros(),
+            descriptor_set: None,
+            buffer: None,
+        };
+
+        Example {
+            model,
+            cubes: [cube1, cube2],
+        }
+    }
+}
 
 mod vs {
     vulkano_shaders::shader! {
@@ -67,27 +108,21 @@ mod vs {
 #version 450
 
 layout (location = 0) in vec3 position;
+layout (location = 1) in vec2 uv;
 
-layout (binding = 0) uniform UBO
+layout (set = 0, binding = 0) uniform UBO
 {
 	mat4 projection;
 	mat4 view;
 	mat4 model;
 } ubo;
 
-layout(push_constant) uniform PushConsts {
-	vec4 color;
-	vec4 position;
-} pushConsts;
-
-layout (location = 0) out vec3 outColor;
+layout (location = 0) out vec2 outUV;
 
 void main()
 {
-	outColor = pushConsts.color.rgb;
-	vec3 locPos = vec3(ubo.model * vec4(position, 1.0));
-	vec3 worldPos = locPos + pushConsts.position.xyz;
-	gl_Position =  ubo.projection * ubo.view * vec4(worldPos, 1.0);
+	outUV = uv;
+	gl_Position =  ubo.projection * ubo.view * ubo.model * vec4(position, 1.0);
 }
 "
     }
@@ -99,13 +134,15 @@ mod fs {
         src: "
 #version 450
 
-layout (location = 0) in vec3 inColor;
+layout (set = 0, binding = 1) uniform sampler2D samplerColorMap;
+
+layout (location = 0) in vec2 inUV;
 
 layout (location = 0) out vec4 outFragColor;
 
 void main()
 {
-	outFragColor.rgb = inColor;
+	outFragColor = vec4(vec3(2), 1) * texture(samplerColorMap, inUV);
 }
 "
     }
@@ -130,34 +167,8 @@ fn get_pipeline(
         .unwrap()
 }
 
-struct Example {
-    spheres: [SpherePushConstantData; 16],
-    model: Model,
-}
-
-impl Example {
-    fn new() -> Self {
-        let model = Model::load("./assets/models/sphere.gltf");
-
-        let mut ex = Example { spheres: Default::default(), model };
-
-        let mut rnd = rand::thread_rng();
-
-        let mut random_num = move || { rnd.gen_range(0.0..1.0) };
-
-        // Setup random colors and fixed positions for every sphere in the scene
-        for i in 0..ex.spheres.len() {
-            ex.spheres[i].color = Vec4::new(random_num(), random_num(), random_num(), 1.0);
-            let rad = f32::to_radians(i as f32 * 360.0 / ex.spheres.len() as f32);
-            ex.spheres[i].position = Vec4::new(f32::sin(rad) * 3.5, f32::cos(rad) * 3.5, 0.0, 1.0);
-        }
-
-        ex
-    }
-}
-
 pub fn main() {
-    let (mut app, event_loop) = App::new("pushconstants");
+    let (mut app, event_loop) = App::new("descriptorsets");
 
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(app.device.clone()));
 
@@ -189,10 +200,17 @@ pub fn main() {
 
     let framebuffers = app.get_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
 
-    let example = Example::new();
+    let aspect_ratio =
+        app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
+    let projection = perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
+    let mut camera = Camera::new(vec3(0.0, 0.0, -5.0), projection);
+    let mut example = Example::new(&camera);
 
-    let vertices = example.model.vertices.into_iter().map(|v| Vertex {
-        position: v
+    println!("uvs: {:?}", example.model.tex_coords);
+
+    let vertices = example.model.vertices.into_iter().zip(example.model.tex_coords).map(|(v, t)| Vertex {
+        position: v,
+        uv: t,
     });
 
     let vertex_buffer = CpuAccessibleBuffer::from_iter(
@@ -213,7 +231,7 @@ pub fn main() {
             ..Default::default()
         },
         false,
-        example.model.indices.into_iter(),
+        example.model.indices,
     ).expect("failed to create index buffer");
 
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
@@ -223,28 +241,18 @@ pub fn main() {
         depth_range: 0.0..1.0,
     };
 
+    for cube in &mut example.cubes {
+        cube.buffer = Some(CpuAccessibleBuffer::from_data(
+            memory_allocator.as_ref(),
+            BufferUsage {
+                uniform_buffer: true,
+                ..Default::default()
+            },
+            false,
+            cube.matrices,
+        ).unwrap());
+    }
 
-    let aspect_ratio =
-        app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
-    let projection = perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 256.0);
-    let mut camera = Camera::new(vec3(0.0, 0.0, -10.0), projection);
-
-    let sphere_scale = 0.5f32;
-    let data = UBO {
-        projection: camera.get_perspective_matrix(),
-        view: camera.get_view_matrix(),
-        model: identity::<f32, 4>() * Mat4::from_diagonal(&vec4(sphere_scale, sphere_scale, sphere_scale, 1.0)),
-    };
-
-    let ubo = CpuAccessibleBuffer::from_data(
-        memory_allocator.as_ref(),
-        BufferUsage {
-            uniform_buffer: true,
-            ..Default::default()
-        },
-        false,
-        data,
-    ).unwrap();
 
     let pipeline = get_pipeline(
         app.device.clone(),
@@ -257,13 +265,62 @@ pub fn main() {
     let layout = pipeline.layout().set_layouts().get(0).unwrap();
 
     let descriptor_allocator = StandardDescriptorSetAllocator::new(app.device.clone());
-    let set = PersistentDescriptorSet::new(
-        &descriptor_allocator,
-        layout.clone(),
-        [WriteDescriptorSet::buffer(0, ubo.clone())],
-    ).unwrap();
 
-    let mut command_buffers = get_command_buffers(&app, &example.spheres, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &set);
+    let mut uploads = AutoCommandBufferBuilder::primary(
+        &app.allocator_command_buffer,
+        app.queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+        .unwrap();
+
+    let textures = vec![
+        include_bytes!("../../assets/textures/crate01_color_height_rgba.ktx").to_vec(),
+        include_bytes!("../../assets/textures/crate02_color_height_rgba.ktx").to_vec(),
+    ]
+        .into_iter()
+        .map(|png_bytes| {
+            let cursor = Cursor::new(png_bytes);
+            let decoder = ktx::Decoder::new(cursor).unwrap();
+            let mut image_data = Vec::new();
+            let width = decoder.pixel_width();
+            let height = decoder.pixel_height();
+            image_data = decoder.read_textures().next().unwrap();
+            let dimensions = ImageDimensions::Dim2d {
+                width,
+                height,
+                array_layers: 1,
+            };
+            ImmutableImage::from_iter(
+                &memory_allocator,
+                image_data,
+                dimensions,
+                MipmapsCount::Log2,
+                Format::R8G8B8A8_SRGB,
+                &mut uploads,
+            )
+                .unwrap()
+        })
+        .collect::<Vec<Arc<ImmutableImage>>>();
+
+    let sampler = Sampler::new(app.device.clone(), SamplerCreateInfo::simple_repeat_linear()).unwrap();
+
+    for (i, cube) in example.cubes.iter_mut().enumerate() {
+        cube.descriptor_set = Some(PersistentDescriptorSet::new(
+            &descriptor_allocator,
+            layout.clone(),
+            [WriteDescriptorSet::buffer(0, cube.buffer.as_ref().unwrap().clone()),
+                WriteDescriptorSet::image_view_sampler(1, ImageView::new_default(textures[i].clone()).unwrap(), sampler.clone())],
+        ).unwrap());
+    }
+
+    let _ = uploads
+        .build()
+        .unwrap()
+        .execute(app.queue.clone())
+        .unwrap()
+        .then_signal_fence_and_flush();
+
+    let mut command_buffers = get_command_buffers(&app, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &example.cubes);
 
     let mut recreate_swapchain = true;
 
@@ -335,10 +392,21 @@ pub fn main() {
             mouse_pressed.1 = state == ElementState::Pressed;
         }
         Event::MainEventsCleared => {
-            let mut write_buffer = ubo.write().unwrap();
-
             camera.update_view_matrix();
-            write_buffer.view = camera.get_view_matrix();
+
+            let mut cube1 = example.cubes[0].buffer.as_ref().unwrap().write().unwrap();
+            cube1.model = translate(&identity(), &vec3(-2.0, 0.0, 0.0));
+            let mut cube2 = example.cubes[1].buffer.as_ref().unwrap().write().unwrap();
+            cube2.model = translate(&identity(), &vec3(1.5, 0.5, 0.0));
+
+            for (i, cube) in [cube1, cube2].iter_mut().enumerate() {
+                cube.projection = camera.get_perspective_matrix();
+                cube.view = camera.get_view_matrix();
+                cube.model = rotate(&cube.model, f32::to_radians(example.cubes[i].rotation.x), &Vec3::x_axis());
+                cube.model = rotate(&cube.model, f32::to_radians(example.cubes[i].rotation.y), &Vec3::y_axis());
+                cube.model = rotate(&cube.model, f32::to_radians(example.cubes[i].rotation.z), &Vec3::z_axis());
+                cube.model = scale(&cube.model, &Vec3::from_element(0.25));
+            }
         }
         Event::RedrawRequested(..) => {
             let elapsed = last_frame.elapsed().as_millis();
@@ -348,6 +416,16 @@ pub fn main() {
                 last_frame = Instant::now();
             }
 
+            {
+                example.cubes[0].rotation.x += 1.2;
+                if example.cubes[0].rotation.x > 360.0 {
+                    example.cubes[0].rotation.x -= 360.0;
+                }
+                example.cubes[1].rotation.y += 0.8;
+                if example.cubes[1].rotation.y > 360.0 {
+                    example.cubes[1].rotation.y -= 360.0;
+                }
+            }
 
             let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
 
@@ -376,7 +454,7 @@ pub fn main() {
                 viewport.clone(),
             );
             command_buffers =
-                get_command_buffers(&app, &example.spheres, &new_pipeline, &new_framebuffers, &vertex_buffer, &index_buffer, &set);
+                get_command_buffers(&app, &new_pipeline, &new_framebuffers, &vertex_buffer, &index_buffer, &example.cubes);
 
 
             let (image_i, _suboptimal, acquire_future) =
@@ -387,7 +465,6 @@ pub fn main() {
                     }
                     Err(e) => panic!("failed to acquire next image: {:?}", e),
                 };
-
 
             let execution = sync::now(app.device.clone())
                 .join(acquire_future)
@@ -420,12 +497,11 @@ pub fn main() {
 
 fn get_command_buffers(
     app: &App,
-    spheres: &[SpherePushConstantData],
     pipeline: &Arc<GraphicsPipeline>,
     framebuffers: &[Arc<Framebuffer>],
     vertex_buffer: &Arc<CpuAccessibleBuffer<[Vertex]>>,
     index_buffer: &Arc<CpuAccessibleBuffer<[u16]>>,
-    set: &Arc<PersistentDescriptorSet>,
+    cubes: &[Cube; 2],
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
         .iter()
@@ -450,12 +526,12 @@ fn get_command_buffers(
                 ).unwrap()
                 .bind_pipeline_graphics(pipeline.clone())
                 .bind_vertex_buffers(0, vertex_buffer.clone())
-                .bind_index_buffer(index_buffer.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline.layout().clone(), 0, set.clone());
-
-            for push_constant in spheres {
+                .bind_index_buffer(index_buffer.clone());
+            for cube in cubes {
                 builder
-                    .push_constants(pipeline.layout().clone(), 0, *push_constant)
+                    .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline.layout().clone(), 0,
+                                          vec![cube.descriptor_set.as_ref().unwrap().clone(),
+                                          ])
                     .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0).unwrap();
             }
 
