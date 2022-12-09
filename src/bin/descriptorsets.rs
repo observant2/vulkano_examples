@@ -1,6 +1,7 @@
 use std::io::Cursor;
+use std::process::exit;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
 use ktx::KtxInfo;
@@ -80,8 +81,6 @@ impl Example {
             descriptor_set: None,
             buffer: None,
         };
-
-        println!("model matrix: {:?}", cube1.matrices.model);
 
         let cube2 = Cube {
             matrices: Matrices {
@@ -198,15 +197,13 @@ pub fn main() {
     )
         .unwrap();
 
-    let framebuffers = app.get_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
+    let mut framebuffers = app.get_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
 
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
     let projection = perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
     let mut camera = Camera::new(vec3(0.0, 0.0, -5.0), projection);
     let mut example = Example::new(&camera);
-
-    println!("uvs: {:?}", example.model.tex_coords);
 
     let vertices = example.model.vertices.into_iter().zip(example.model.tex_coords).map(|(v, t)| Vertex {
         position: v,
@@ -254,7 +251,7 @@ pub fn main() {
     }
 
 
-    let pipeline = get_pipeline(
+    let mut pipeline = get_pipeline(
         app.device.clone(),
         vs_shader.clone(),
         fs_shader.clone(),
@@ -324,17 +321,13 @@ pub fn main() {
 
     let mut recreate_swapchain = true;
 
-    let mut now_keys = [false; 255];
-    let mut prev_keys = now_keys;
-
     let mut mouse_pressed: (MouseButton, bool) = (MouseButton::Left, false);
 
     let mut last_frame = Instant::now();
 
+    let mut previous_frame_end = Some(sync::now(app.device.clone()).boxed());
+
     event_loop.run(move |event, _, control_flow| match event {
-        Event::NewEvents(_) => {
-            prev_keys.copy_from_slice(&now_keys);
-        }
         Event::WindowEvent {
             event: WindowEvent::CloseRequested,
             ..
@@ -342,24 +335,10 @@ pub fn main() {
             *control_flow = ControlFlow::ExitWithCode(0);
         }
         Event::WindowEvent {
-            event: WindowEvent::KeyboardInput {
-                input: KeyboardInput {
-                    virtual_keycode: Some(keycode),
-                    state,
-                    ..
-                },
-                ..
-            },
+            event: WindowEvent::Resized(_),
             ..
         } => {
-            match state {
-                ElementState::Pressed => {
-                    now_keys[keycode as usize] = true;
-                }
-                ElementState::Released => {
-                    now_keys[keycode as usize] = false;
-                }
-            }
+            recreate_swapchain = true;
         }
         Event::WindowEvent {
             event: MouseWheel {
@@ -377,6 +356,7 @@ pub fn main() {
             ..
         } => {
             let scale = 1.0;
+
             if mouse_pressed.1 {
                 camera.rotation.x += y as f32 / scale;
                 camera.rotation.y += x as f32 / scale;
@@ -393,20 +373,6 @@ pub fn main() {
         }
         Event::MainEventsCleared => {
             camera.update_view_matrix();
-
-            let mut cube1 = example.cubes[0].buffer.as_ref().unwrap().write().unwrap();
-            cube1.model = translate(&identity(), &vec3(-2.0, 0.0, 0.0));
-            let mut cube2 = example.cubes[1].buffer.as_ref().unwrap().write().unwrap();
-            cube2.model = translate(&identity(), &vec3(1.5, 0.5, 0.0));
-
-            for (i, cube) in [cube1, cube2].iter_mut().enumerate() {
-                cube.projection = camera.get_perspective_matrix();
-                cube.view = camera.get_view_matrix();
-                cube.model = rotate(&cube.model, f32::to_radians(example.cubes[i].rotation.x), &Vec3::x_axis());
-                cube.model = rotate(&cube.model, f32::to_radians(example.cubes[i].rotation.y), &Vec3::y_axis());
-                cube.model = rotate(&cube.model, f32::to_radians(example.cubes[i].rotation.z), &Vec3::z_axis());
-                cube.model = scale(&cube.model, &Vec3::from_element(0.25));
-            }
         }
         Event::RedrawRequested(..) => {
             let elapsed = last_frame.elapsed().as_millis();
@@ -415,6 +381,8 @@ pub fn main() {
             } else {
                 last_frame = Instant::now();
             }
+
+            previous_frame_end.as_mut().unwrap().cleanup_finished();
 
             {
                 example.cubes[0].rotation.x += 1.2;
@@ -429,35 +397,64 @@ pub fn main() {
 
             let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
 
-            if window.inner_size().width == 0 {
+            if window.inner_size().width == 0 || window.inner_size().height == 0 {
                 return;
             }
 
-            let (new_swapchain, new_images) =
-                match app.swapchain.recreate(SwapchainCreateInfo {
-                    image_extent: window.inner_size().into(),
-                    ..app.swapchain.create_info()
-                }) {
-                    Ok(r) => r,
-                    Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
-                    Err(e) => panic!("failed to recreate swapchain: {:?}", e),
-                };
-            app.swapchain = new_swapchain;
-            let new_framebuffers = app.get_framebuffers(&memory_allocator, &new_images, &render_pass);
+            if recreate_swapchain {
+                let (new_swapchain, new_images) =
+                    match app.swapchain.recreate(SwapchainCreateInfo {
+                        image_extent: window.inner_size().into(),
+                        ..app.swapchain.create_info()
+                    }) {
+                        Ok(r) => r,
+                        Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
+                        Err(e) => panic!("failed to recreate swapchain: {:?}", e),
+                    };
+                app.swapchain = new_swapchain;
+                framebuffers = app.get_framebuffers(&memory_allocator, &new_images, &render_pass);
 
-            viewport.dimensions = window.inner_size().into();
-            let new_pipeline = get_pipeline(
-                app.device.clone(),
-                vs_shader.clone(),
-                fs_shader.clone(),
-                render_pass.clone(),
-                viewport.clone(),
-            );
-            command_buffers =
-                get_command_buffers(&app, &new_pipeline, &new_framebuffers, &vertex_buffer, &index_buffer, &example.cubes);
+                viewport.dimensions = window.inner_size().into();
+                pipeline = get_pipeline(
+                    app.device.clone(),
+                    vs_shader.clone(),
+                    fs_shader.clone(),
+                    render_pass.clone(),
+                    viewport.clone(),
+                );
 
+                let aspect_ratio =
+                    app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
+                let perspective = perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
+                camera.set_perspective(perspective);
 
-            let (image_i, _suboptimal, acquire_future) =
+                command_buffers = get_command_buffers(&app, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &example.cubes);
+
+                recreate_swapchain = false;
+            }
+
+            {
+                let cube1 = example.cubes[0].buffer.as_ref().unwrap().write();
+                let cube2 = example.cubes[1].buffer.as_ref().unwrap().write();
+
+                if cube1.is_ok() && cube2.is_ok() {
+                    let mut cube1 = cube1.unwrap();
+                    let mut cube2 = cube2.unwrap();
+                    cube1.model = translate(&identity(), &vec3(-2.0, 0.0, 0.0));
+                    cube2.model = translate(&identity(), &vec3(1.5, 0.5, 0.0));
+
+                    for (i, cube) in [cube1, cube2].iter_mut().enumerate() {
+                        cube.projection = camera.get_perspective_matrix();
+                        cube.view = camera.get_view_matrix();
+                        cube.model = rotate(&cube.model, f32::to_radians(example.cubes[i].rotation.x), &Vec3::x_axis());
+                        cube.model = rotate(&cube.model, f32::to_radians(example.cubes[i].rotation.y), &Vec3::y_axis());
+                        cube.model = rotate(&cube.model, f32::to_radians(example.cubes[i].rotation.z), &Vec3::z_axis());
+                        cube.model = scale(&cube.model, &Vec3::from_element(0.25));
+                    }
+                }
+            }
+
+            let (image_i, suboptimal, acquire_future) =
                 match swapchain::acquire_next_image(app.swapchain.clone(), None) {
                     Ok(r) => r,
                     Err(AcquireError::OutOfDate) => {
@@ -466,7 +463,13 @@ pub fn main() {
                     Err(e) => panic!("failed to acquire next image: {:?}", e),
                 };
 
-            let execution = sync::now(app.device.clone())
+            if suboptimal {
+                recreate_swapchain = true;
+            }
+
+            let future = previous_frame_end
+                .take()
+                .unwrap()
                 .join(acquire_future)
                 .then_execute(app.queue.clone(), command_buffers[image_i as usize].clone())
                 .unwrap()
@@ -476,15 +479,17 @@ pub fn main() {
                 )
                 .then_signal_fence_and_flush();
 
-            match execution {
+            match future {
                 Ok(future) => {
-                    future.wait(None).unwrap();
+                    previous_frame_end = Some(future.boxed());
                 }
                 Err(FlushError::OutOfDate) => {
                     recreate_swapchain = true;
+                    previous_frame_end = Some(sync::now(app.device.clone()).boxed());
                 }
                 Err(e) => {
-                    println!("failed to flush future: {:?}", e);
+                    println!("Failed to flush future: {:?}", e);
+                    previous_frame_end = Some(sync::now(app.device.clone()).boxed());
                 }
             }
         }

@@ -54,6 +54,10 @@ impl Camera {
     pub fn set_rotation(&mut self, rotation: Vec3) {
         self.rotation = rotation;
     }
+    
+    pub fn set_perspective(&mut self, perspective: Mat4) {
+        self.perspective_matrix = perspective;
+    }
 
     pub fn rotate(&mut self, delta: Vec3) {
         self.rotation += delta;

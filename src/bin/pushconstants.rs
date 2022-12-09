@@ -263,7 +263,7 @@ pub fn main() {
         [WriteDescriptorSet::buffer(0, ubo.clone())],
     ).unwrap();
 
-    let mut command_buffers = get_command_buffers(&app, &example.spheres, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &set);
+    let mut command_buffers: Vec<_> = get_command_buffers(&app, &example.spheres, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &set);
 
     let mut recreate_swapchain = true;
 
