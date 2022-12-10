@@ -1,10 +1,14 @@
 use nalgebra_glm::{Mat4, rotate_x, rotate_y, rotate_z, translate, Vec3, vec3};
+use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta};
+use winit::event::DeviceEvent::{Button, MouseMotion};
+use winit::event::WindowEvent::MouseWheel;
 
 pub struct Camera {
     view_matrix: Mat4,
     perspective_matrix: Mat4,
     pub position: Vec3,
     pub rotation: Vec3,
+    pub mouse_pressed: (MouseButton, bool),
 }
 
 impl Camera {
@@ -13,11 +17,49 @@ impl Camera {
             position,
             rotation: vec3(0.0, 0.0, 0.0),
             view_matrix: Mat4::identity(),
-            perspective_matrix: nalgebra_glm::perspective(aspect,fovy, near, far),
+            perspective_matrix: nalgebra_glm::perspective(aspect, fovy, near, far),
+            mouse_pressed: (MouseButton::Left, false),
         };
         camera.update_view_matrix();
 
         camera
+    }
+
+    pub fn handle_input(&mut self, event: &Event<()>) {
+        match event {
+            Event::WindowEvent {
+                event: MouseWheel {
+                    delta: MouseScrollDelta::LineDelta(_x, y),
+                    ..
+                },
+                ..
+            } => {
+                self.translate(vec3(0.0, 0.0, y * 2.0));
+            }
+            Event::DeviceEvent {
+                event: MouseMotion {
+                    delta: (x, y)
+                },
+                ..
+            } => {
+                let scale = 1.0;
+
+                if self.mouse_pressed.1 {
+                    self.rotation.x += *y as f32 / scale;
+                    self.rotation.y += *x as f32 / scale;
+                }
+            }
+            Event::DeviceEvent {
+                event: Button {
+                    state,
+                    ..
+                },
+                ..
+            } => {
+                self.mouse_pressed.1 = *state == ElementState::Pressed;
+            }
+            _ => {}
+        }
     }
 
     pub fn update_view_matrix(&mut self) {

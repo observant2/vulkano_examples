@@ -2,47 +2,41 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
-use gltf::{Document, Semantic};
-use gltf::accessor::Dimensions;
-use gltf::buffer::Data;
-use gltf::json::accessor::ComponentType;
-use nalgebra_glm::{identity, Mat4, perspective, vec3, Vec4, vec4};
+use nalgebra_glm::{identity, Mat4, vec3, Vec4, vec4};
 use rand::Rng;
-use vulkano_examples::{App};
+use vulkano::{swapchain, sync};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
+use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::device::Device;
-
+use vulkano::format::{ClearValue, Format};
 use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveTopology};
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
+use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
-use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
 use vulkano::shader::ShaderModule;
 use vulkano::swapchain::{
     AcquireError, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo,
 };
 use vulkano::sync::{FlushError, GpuFuture};
-use vulkano::{swapchain, sync};
-use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::format::{ClearValue, Format};
-use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
-use winit::event::{ElementState, Event, KeyboardInput, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event::DeviceEvent::{Button, MouseMotion};
-use winit::event::WindowEvent::MouseWheel;
-use winit::event_loop::{ControlFlow};
-use winit::window::{Window};
+use winit::event::{Event, WindowEvent};
+use winit::event_loop::ControlFlow;
+use winit::window::Window;
+
+use vulkano_examples::App;
 use vulkano_examples::camera::Camera;
 use vulkano_examples::gltf_loader::Model;
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
 struct UBO {
-    projection: Mat4,
-    view: Mat4,
     model: Mat4,
+    view: Mat4,
+    projection: Mat4,
 }
 
 #[repr(C)]
@@ -70,11 +64,13 @@ layout (location = 0) in vec3 position;
 
 layout (binding = 0) uniform UBO
 {
-	mat4 projection;
-	mat4 view;
 	mat4 model;
+	mat4 view;
+	mat4 projection;
 } ubo;
 
+// name of uniform and variable doesn't matter
+// layout specifier does matter
 layout(push_constant) uniform PushConsts {
 	vec4 color;
 	vec4 position;
@@ -161,9 +157,6 @@ pub fn main() {
 
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(app.device.clone()));
 
-    let vs_shader = vs::load(app.device.clone()).unwrap();
-    let fs_shader = fs::load(app.device.clone()).unwrap();
-
     let render_pass = vulkano::single_pass_renderpass!(
         app.device.clone(),
         attachments: {
@@ -191,8 +184,8 @@ pub fn main() {
 
     let example = Example::new();
 
-    let vertices = example.model.vertices.into_iter().map(|v| Vertex {
-        position: v
+    let vertices = example.model.vertices.iter().map(|v| Vertex {
+        position: *v
     });
 
     let vertex_buffer = CpuAccessibleBuffer::from_iter(
@@ -230,9 +223,9 @@ pub fn main() {
 
     let sphere_scale = 0.5f32;
     let data = UBO {
-        projection: camera.get_perspective_matrix(),
-        view: camera.get_view_matrix(),
         model: identity::<f32, 4>() * Mat4::from_diagonal(&vec4(sphere_scale, sphere_scale, sphere_scale, 1.0)),
+        view: camera.get_view_matrix(),
+        projection: camera.get_perspective_matrix(),
     };
 
     let ubo = CpuAccessibleBuffer::from_data(
@@ -245,6 +238,8 @@ pub fn main() {
         data,
     ).unwrap();
 
+    let vs_shader = vs::load(app.device.clone()).unwrap();
+    let fs_shader = fs::load(app.device.clone()).unwrap();
     let pipeline = get_pipeline(
         app.device.clone(),
         vs_shader.clone(),
@@ -255,6 +250,8 @@ pub fn main() {
 
     let layout = pipeline.layout().set_layouts().get(0).unwrap();
 
+    // We only create a descriptorset for mvp matrices.
+    // This setup is not required for push constants.
     let descriptor_allocator = StandardDescriptorSetAllocator::new(app.device.clone());
     let set = PersistentDescriptorSet::new(
         &descriptor_allocator,
@@ -262,157 +259,105 @@ pub fn main() {
         [WriteDescriptorSet::buffer(0, ubo.clone())],
     ).unwrap();
 
-    let mut command_buffers: Vec<_> = get_command_buffers(&app, &example.spheres, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &set);
+    let mut command_buffers: Vec<_> =
+        get_command_buffers(&app,
+                            &example.spheres, // pass push constants to command buffer
+                            &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &set);
 
     let mut recreate_swapchain = true;
 
-    let mut now_keys = [false; 255];
-    let mut prev_keys = now_keys;
-
-    let mut mouse_pressed: (MouseButton, bool) = (MouseButton::Left, false);
-
     let mut last_frame = Instant::now();
 
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::NewEvents(_) => {
-            prev_keys.copy_from_slice(&now_keys);
-        }
-        Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } => {
-            *control_flow = ControlFlow::ExitWithCode(0);
-        }
-        Event::WindowEvent {
-            event: WindowEvent::KeyboardInput {
-                input: KeyboardInput {
-                    virtual_keycode: Some(keycode),
-                    state,
-                    ..
-                },
+    event_loop.run(move |event, _, control_flow| {
+        camera.handle_input(&event);
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
                 ..
-            },
-            ..
-        } => {
-            match state {
-                ElementState::Pressed => {
-                    now_keys[keycode as usize] = true;
+            } => {
+                *control_flow = ControlFlow::ExitWithCode(0);
+            }
+            Event::MainEventsCleared => {
+                let mut write_buffer = ubo.write().unwrap();
+
+                camera.update_view_matrix();
+                write_buffer.view = camera.get_view_matrix();
+            }
+            Event::RedrawRequested(..) => {
+                let elapsed = last_frame.elapsed().as_millis();
+                if elapsed < (1000.0 / 60.0) as u128 {
+                    return;
+                } else {
+                    last_frame = Instant::now();
                 }
-                ElementState::Released => {
-                    now_keys[keycode as usize] = false;
+
+
+                let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
+
+                if window.inner_size().width == 0 {
+                    return;
                 }
-            }
-        }
-        Event::WindowEvent {
-            event: MouseWheel {
-                delta: MouseScrollDelta::LineDelta(_x, y),
-                ..
-            },
-            ..
-        } => {
-            camera.translate(vec3(0.0, 0.0, y * 2.0));
-        }
-        Event::DeviceEvent {
-            event: MouseMotion {
-                delta: (x, y)
-            },
-            ..
-        } => {
-            let scale = 1.0;
-            if mouse_pressed.1 {
-                camera.rotation.x += y as f32 / scale;
-                camera.rotation.y += x as f32 / scale;
-            }
-        }
-        Event::DeviceEvent {
-            event: Button {
-                state,
-                ..
-            },
-            ..
-        } => {
-            mouse_pressed.1 = state == ElementState::Pressed;
-        }
-        Event::MainEventsCleared => {
-            let mut write_buffer = ubo.write().unwrap();
 
-            camera.update_view_matrix();
-            write_buffer.view = camera.get_view_matrix();
-        }
-        Event::RedrawRequested(..) => {
-            let elapsed = last_frame.elapsed().as_millis();
-            if elapsed < (1000.0 / 60.0) as u128 {
-                return;
-            } else {
-                last_frame = Instant::now();
-            }
+                let (new_swapchain, new_images) =
+                    match app.swapchain.recreate(SwapchainCreateInfo {
+                        image_extent: window.inner_size().into(),
+                        ..app.swapchain.create_info()
+                    }) {
+                        Ok(r) => r,
+                        Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
+                        Err(e) => panic!("failed to recreate swapchain: {:?}", e),
+                    };
+                app.swapchain = new_swapchain;
+                let new_framebuffers = app.get_framebuffers(&memory_allocator, &new_images, &render_pass);
+
+                viewport.dimensions = window.inner_size().into();
+                let new_pipeline = get_pipeline(
+                    app.device.clone(),
+                    vs_shader.clone(),
+                    fs_shader.clone(),
+                    render_pass.clone(),
+                    viewport.clone(),
+                );
+                command_buffers =
+                    get_command_buffers(&app, &example.spheres, &new_pipeline, &new_framebuffers, &vertex_buffer, &index_buffer, &set);
 
 
-            let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
-
-            if window.inner_size().width == 0 {
-                return;
-            }
-
-            let (new_swapchain, new_images) =
-                match app.swapchain.recreate(SwapchainCreateInfo {
-                    image_extent: window.inner_size().into(),
-                    ..app.swapchain.create_info()
-                }) {
-                    Ok(r) => r,
-                    Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
-                    Err(e) => panic!("failed to recreate swapchain: {:?}", e),
-                };
-            app.swapchain = new_swapchain;
-            let new_framebuffers = app.get_framebuffers(&memory_allocator, &new_images, &render_pass);
-
-            viewport.dimensions = window.inner_size().into();
-            let new_pipeline = get_pipeline(
-                app.device.clone(),
-                vs_shader.clone(),
-                fs_shader.clone(),
-                render_pass.clone(),
-                viewport.clone(),
-            );
-            command_buffers =
-                get_command_buffers(&app, &example.spheres, &new_pipeline, &new_framebuffers, &vertex_buffer, &index_buffer, &set);
+                let (image_i, _suboptimal, acquire_future) =
+                    match swapchain::acquire_next_image(app.swapchain.clone(), None) {
+                        Ok(r) => r,
+                        Err(AcquireError::OutOfDate) => {
+                            return;
+                        }
+                        Err(e) => panic!("failed to acquire next image: {:?}", e),
+                    };
 
 
-            let (image_i, _suboptimal, acquire_future) =
-                match swapchain::acquire_next_image(app.swapchain.clone(), None) {
-                    Ok(r) => r,
-                    Err(AcquireError::OutOfDate) => {
-                        return;
+                let execution = sync::now(app.device.clone())
+                    .join(acquire_future)
+                    .then_execute(app.queue.clone(), command_buffers[image_i as usize].clone())
+                    .unwrap()
+                    .then_swapchain_present(
+                        app.queue.clone(),
+                        SwapchainPresentInfo::swapchain_image_index(app.swapchain.clone(), image_i),
+                    )
+                    .then_signal_fence_and_flush();
+
+                match execution {
+                    Ok(future) => {
+                        future.wait(None).unwrap();
                     }
-                    Err(e) => panic!("failed to acquire next image: {:?}", e),
-                };
-
-
-            let execution = sync::now(app.device.clone())
-                .join(acquire_future)
-                .then_execute(app.queue.clone(), command_buffers[image_i as usize].clone())
-                .unwrap()
-                .then_swapchain_present(
-                    app.queue.clone(),
-                    SwapchainPresentInfo::swapchain_image_index(app.swapchain.clone(), image_i),
-                )
-                .then_signal_fence_and_flush();
-
-            match execution {
-                Ok(future) => {
-                    future.wait(None).unwrap();
-                }
-                Err(FlushError::OutOfDate) => {
-                    recreate_swapchain = true;
-                }
-                Err(e) => {
-                    println!("failed to flush future: {:?}", e);
+                    Err(FlushError::OutOfDate) => {
+                        recreate_swapchain = true;
+                    }
+                    Err(e) => {
+                        println!("failed to flush future: {:?}", e);
+                    }
                 }
             }
-        }
-        _ => {
-            let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
-            window.request_redraw();
+            _ => {
+                let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
+                window.request_redraw();
+            }
         }
     });
 }
@@ -454,7 +399,9 @@ fn get_command_buffers(
 
             for push_constant in spheres {
                 builder
+                    // set push constant
                     .push_constants(pipeline.layout().clone(), 0, *push_constant)
+                    // draw sphere with offset from push constant
                     .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0).unwrap();
             }
 
