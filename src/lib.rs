@@ -164,7 +164,7 @@ impl App {
             .iter()
             .map(|image| {
                 let view = ImageView::new_default(image.clone()).unwrap();
-                let depth_buffer = ImageView::new_default(AttachmentImage::transient(memory_allocator, image.dimensions().width_height(), Format::D32_SFLOAT).unwrap()).unwrap();
+                let depth_buffer = ImageView::new_default(AttachmentImage::transient(memory_allocator, image.dimensions().width_height(), Format::D24_UNORM_S8_UINT).unwrap()).unwrap();
                 Framebuffer::new(
                     render_pass.clone(),
                     FramebufferCreateInfo {

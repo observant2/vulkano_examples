@@ -169,7 +169,7 @@ pub fn main() {
             depth: {
                 load: Clear,
                 store: DontCare,
-                format: Format::D32_SFLOAT,
+                format: Format::D24_UNORM_S8_UINT,
                 samples: 1,
             }
         },
@@ -386,7 +386,7 @@ fn get_command_buffers(
                     RenderPassBeginInfo {
                         clear_values: vec![
                             Some([0.1, 0.1, 0.1, 1.0].into()),
-                            Some(ClearValue::Depth(1.0)),
+                            Some(ClearValue::DepthStencil((1.0, 0))),
                         ],
                         ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
                     },
