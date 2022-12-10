@@ -8,12 +8,12 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub fn new(position: Vec3, perspective: Mat4) -> Self {
+    pub fn new(position: Vec3, aspect: f32, fovy: f32, near: f32, far: f32) -> Self {
         let mut camera = Camera {
             position,
             rotation: vec3(0.0, 0.0, 0.0),
             view_matrix: Mat4::identity(),
-            perspective_matrix: perspective,
+            perspective_matrix: nalgebra_glm::perspective(aspect,fovy, near, far),
         };
         camera.update_view_matrix();
 
@@ -54,9 +54,9 @@ impl Camera {
     pub fn set_rotation(&mut self, rotation: Vec3) {
         self.rotation = rotation;
     }
-    
-    pub fn set_perspective(&mut self, perspective: Mat4) {
-        self.perspective_matrix = perspective;
+
+    pub fn set_perspective(&mut self, aspect: f32, fovy: f32, near: f32, far: f32) {
+        self.perspective_matrix = nalgebra_glm::perspective(aspect, fovy, near, far);
     }
 
     pub fn rotate(&mut self, delta: Vec3) {

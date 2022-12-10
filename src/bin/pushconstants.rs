@@ -226,8 +226,7 @@ pub fn main() {
 
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
-    let projection = perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 256.0);
-    let mut camera = Camera::new(vec3(0.0, 0.0, -10.0), projection);
+    let mut camera = Camera::new(vec3(0.0, 0.0, -10.0), aspect_ratio, f32::to_radians(60.0), 0.01, 256.0);
 
     let sphere_scale = 0.5f32;
     let data = UBO {

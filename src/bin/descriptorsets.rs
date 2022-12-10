@@ -201,8 +201,7 @@ pub fn main() {
 
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
-    let projection = perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
-    let mut camera = Camera::new(vec3(0.0, 0.0, -5.0), projection);
+    let mut camera = Camera::new(vec3(0.0, 0.0, -5.0), aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
     let mut example = Example::new(&camera);
 
     let vertices = example.model.vertices.into_iter().zip(example.model.tex_coords).map(|(v, t)| Vertex {
@@ -425,8 +424,7 @@ pub fn main() {
 
                 let aspect_ratio =
                     app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
-                let perspective = perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
-                camera.set_perspective(perspective);
+                camera.set_perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
 
                 command_buffers = get_command_buffers(&app, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &example.cubes);
 
