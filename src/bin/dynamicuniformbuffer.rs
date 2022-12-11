@@ -63,13 +63,14 @@ struct Example {
 impl Example {
     fn new() -> Self {
         let mut rand = rand::thread_rng();
-        let r = 0.0..1.0;
+        let r1 = 0.0..1.0;
+        let r2 = -1.0..1.0;
         let mut rotations = [vec3(0.0, 0.0, 0.0); INSTANCES];
         let mut rotation_speeds = [vec3(0.0, 0.0, 0.0); INSTANCES];
 
         for i in 0..INSTANCES {
-            rotations[i] = vec3(rand.gen_range(r.clone()), rand.gen_range(r.clone()), rand.gen_range(r.clone())) * PI * 2.0;
-            rotation_speeds[i] = vec3(rand.gen_range(r.clone()), rand.gen_range(r.clone()), rand.gen_range(r.clone())) * 0.4;
+            rotations[i] = vec3(rand.gen_range(r1.clone()), rand.gen_range(r1.clone()), rand.gen_range(r1.clone())) * PI * 2.0;
+            rotation_speeds[i] = vec3(rand.gen_range(r2.clone()), rand.gen_range(r2.clone()), rand.gen_range(r2.clone())) * 0.3;
         }
 
         Example {
@@ -163,11 +164,11 @@ fn get_pipeline(
                 DescriptorSetLayout::new(device, DescriptorSetLayoutCreateInfo {
                     bindings: BTreeMap::from([
                         (0, DescriptorSetLayoutBinding {
-                            stages: ShaderStages { vertex: true, ..ShaderStages::default() },
+                            stages: ShaderStages::VERTEX,
                             ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBuffer)
                         }),
                         (1, DescriptorSetLayoutBinding {
-                            stages: ShaderStages { vertex: true, ..ShaderStages::default() },
+                            stages: ShaderStages::VERTEX,
                             ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBufferDynamic)
                         }),
                     ]),
@@ -217,10 +218,7 @@ pub fn main() {
 
     let vertex_buffer = CpuAccessibleBuffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage {
-            vertex_buffer: true,
-            ..Default::default()
-        },
+        BufferUsage::VERTEX_BUFFER,
         false,
         example.vertices,
     )
@@ -228,10 +226,7 @@ pub fn main() {
 
     let index_buffer = CpuAccessibleBuffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage {
-            index_buffer: true,
-            ..Default::default()
-        },
+        BufferUsage::INDEX_BUFFER,
         false,
         example.indices,
     ).expect("failed to create index buffer");
@@ -278,10 +273,7 @@ pub fn main() {
 
     let dynamic_model_buffer = CpuAccessibleBuffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage {
-            uniform_buffer: true,
-            ..Default::default()
-        },
+        BufferUsage::UNIFORM_BUFFER,
         false,
         aligned_data.into_iter(),
     ).unwrap();
@@ -289,10 +281,7 @@ pub fn main() {
 
     let view_projection_buffer = CpuAccessibleBuffer::from_data(
         memory_allocator.as_ref(),
-        BufferUsage {
-            uniform_buffer: true,
-            ..Default::default()
-        },
+        BufferUsage::UNIFORM_BUFFER,
         false,
         ViewProjection {
             projection: identity(),

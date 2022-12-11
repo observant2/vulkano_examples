@@ -190,10 +190,7 @@ pub fn main() {
 
     let vertex_buffer = CpuAccessibleBuffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage {
-            vertex_buffer: true,
-            ..Default::default()
-        },
+        BufferUsage::VERTEX_BUFFER,
         false,
         vertices,
     )
@@ -201,10 +198,7 @@ pub fn main() {
 
     let index_buffer = CpuAccessibleBuffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage {
-            index_buffer: true,
-            ..Default::default()
-        },
+        BufferUsage::INDEX_BUFFER,
         false,
         example.model.indices.into_iter(),
     ).expect("failed to create index buffer");
@@ -230,10 +224,7 @@ pub fn main() {
 
     let ubo = CpuAccessibleBuffer::from_data(
         memory_allocator.as_ref(),
-        BufferUsage {
-            uniform_buffer: true,
-            ..Default::default()
-        },
+        BufferUsage::UNIFORM_BUFFER,
         false,
         data,
     ).unwrap();

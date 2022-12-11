@@ -8,7 +8,7 @@ use vulkano::command_buffer::allocator::{
     StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
 };
 use vulkano::device::physical::PhysicalDeviceType;
-use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
+use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{AttachmentImage, ImageAccess, ImageUsage, SwapchainImage};
@@ -46,7 +46,7 @@ pub struct App {
 impl App {
     pub fn new(title: &str) -> (Self, EventLoop<()>) {
         let library = VulkanLibrary::new().expect("no local Vulkan library/DLL");
-        let required_extensions = vulkano_win::required_extensions(&library);
+        let required_extensions = vulkano_win::required_extensions(library.clone().as_ref());
         let instance = Instance::new(
             library,
             InstanceCreateInfo {
@@ -76,7 +76,7 @@ impl App {
                     .iter()
                     .enumerate()
                     .position(|(i, q)| {
-                        q.queue_flags.graphics
+                        q.queue_flags.intersects(QueueFlags::GRAPHICS)
                             && p.surface_support(i as u32, &surface).unwrap_or(false)
                     })
                     .map(|i| (p, i as u32))
@@ -114,7 +114,7 @@ impl App {
             .surface_capabilities(&surface, Default::default())
             .expect("failed to get surface capabilities");
 
-        let composite_alpha = caps.supported_composite_alpha.iter().next().unwrap();
+        let composite_alpha = caps.supported_composite_alpha.into_iter().next().unwrap();
         let image_format = Some(
             physical
                 .surface_formats(&surface, Default::default())
@@ -131,10 +131,7 @@ impl App {
                 min_image_count: caps.min_image_count + 1,
                 image_format,
                 image_extent: window.inner_size().into(),
-                image_usage: ImageUsage {
-                    color_attachment: true,
-                    ..Default::default()
-                },
+                image_usage: ImageUsage::COLOR_ATTACHMENT ,
                 composite_alpha,
                 present_mode: PresentMode::Fifo,
                 ..Default::default()

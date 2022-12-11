@@ -163,11 +163,11 @@ fn get_pipeline(
                 DescriptorSetLayout::new(device, DescriptorSetLayoutCreateInfo {
                     bindings: BTreeMap::from([
                         (0, DescriptorSetLayoutBinding {
-                            stages: ShaderStages { vertex: true, ..ShaderStages::default() },
+                            stages: ShaderStages::VERTEX,
                             ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBuffer)
                         }),
                         (1, DescriptorSetLayoutBinding {
-                            stages: ShaderStages { fragment: true, ..ShaderStages::default() },
+                            stages: ShaderStages::FRAGMENT,
                             ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::CombinedImageSampler)
                         }),
                     ]),
@@ -223,10 +223,7 @@ pub fn main() {
 
     let vertex_buffer = CpuAccessibleBuffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage {
-            vertex_buffer: true,
-            ..Default::default()
-        },
+        BufferUsage::VERTEX_BUFFER,
         false,
         vertices,
     )
@@ -234,10 +231,7 @@ pub fn main() {
 
     let index_buffer = CpuAccessibleBuffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage {
-            index_buffer: true,
-            ..Default::default()
-        },
+        BufferUsage::INDEX_BUFFER,
         false,
         example.model.indices,
     ).expect("failed to create index buffer");
@@ -247,10 +241,7 @@ pub fn main() {
     for cube in &mut example.cubes {
         cube.buffer = Some(CpuAccessibleBuffer::from_data(
             memory_allocator.as_ref(),
-            BufferUsage {
-                uniform_buffer: true,
-                ..Default::default()
-            },
+            BufferUsage::UNIFORM_BUFFER,
             false,
             cube.matrices,
         ).unwrap());
