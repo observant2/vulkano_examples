@@ -182,9 +182,9 @@ pub fn main() {
 
     let framebuffers = app.get_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
 
-    let example = Example::new();
+    let mut example = Example::new();
 
-    let vertices = example.model.vertices.iter().map(|v| Vertex {
+    let vertices = example.model.meshes[0].vertices.iter().map(|v| Vertex {
         position: *v
     });
 
@@ -200,7 +200,7 @@ pub fn main() {
         memory_allocator.as_ref(),
         BufferUsage::INDEX_BUFFER,
         false,
-        example.model.indices.into_iter(),
+        example.model.meshes.remove(0).indices.into_iter(),
     ).expect("failed to create index buffer");
 
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();

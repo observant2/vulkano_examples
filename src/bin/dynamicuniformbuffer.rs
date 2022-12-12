@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::btree_map::BTreeMap;
 use std::f32::consts::PI;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use std::time::Instant;
 use bytemuck::{Pod, Zeroable};
 use nalgebra_glm::{identity, Mat4, rotate, translate, vec3, Vec3};
 use rand::Rng;
-use vulkano::{swapchain, sync};
+use vulkano::{swapchain, sync, DeviceSize};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
 use vulkano::descriptor_set::{DescriptorSet, PersistentDescriptorSet, WriteDescriptorSet};
@@ -297,7 +297,7 @@ pub fn main() {
         layout.clone(),
         [
             WriteDescriptorSet::buffer(0, view_projection_buffer.clone()),
-            WriteDescriptorSet::buffer(1, dynamic_model_buffer.clone()),
+            WriteDescriptorSet::buffer_with_range(1, dynamic_model_buffer.clone(), 0..size_of::<Mat4>() as DeviceSize),
         ],
     ).unwrap();
 

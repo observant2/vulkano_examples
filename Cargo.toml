@@ -11,9 +11,9 @@ gltf = { version = "1.0.0", features = ["extras", "names", "import"] }
 ktx = "0.3.2"
 nalgebra-glm = { version = "0.17.0", features = ["convert-bytemuck", "default"] }
 rand = "0.8.5"
-vulkano = {path = "../vulkano/vulkano"}
-vulkano-shaders = {path = "../vulkano/vulkano-shaders"}
-vulkano-win = {path = "../vulkano/vulkano-win"}
+vulkano = {git = "https://github.com/Rua/vulkano", rev = "abcefb0341a9b6adca26c3ff697e33a3365494d1"}
+vulkano-shaders = {git = "https://github.com/Rua/vulkano", rev = "abcefb0341a9b6adca26c3ff697e33a3365494d1"}
+vulkano-win = {git = "https://github.com/Rua/vulkano", rev = "abcefb0341a9b6adca26c3ff697e33a3365494d1"}
 winit = "=0.27.5"
 
 [profile.dev]
