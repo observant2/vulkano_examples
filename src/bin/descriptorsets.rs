@@ -69,7 +69,7 @@ struct Example {
 
 impl Example {
     fn new() -> Self {
-        let model = Model::load("./assets/models/cube.gltf");
+        let model = Model::load("./data/models/cube.gltf");
 
         let mut cubes = vec![];
 
@@ -283,8 +283,8 @@ pub fn main() {
     // The textures will be bound to descriptorset 0, binding 1
 
     let textures = vec![
-        include_bytes!("../../assets/textures/crate01_color_height_rgba.ktx").to_vec(),
-        include_bytes!("../../assets/textures/crate02_color_height_rgba.ktx").to_vec(),
+        include_bytes!("../../data/textures/crate01_color_height_rgba.ktx").to_vec(),
+        include_bytes!("../../data/textures/crate02_color_height_rgba.ktx").to_vec(),
     ]
         .into_iter()
         .map(|png_bytes| {

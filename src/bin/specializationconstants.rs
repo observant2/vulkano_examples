@@ -190,7 +190,6 @@ fn get_pipeline(
     vs: &Arc<ShaderModule>,
     fs: &Arc<ShaderModule>,
     render_pass: &Arc<RenderPass>,
-    viewport: &Viewport,
     specialization: Specialization,
 ) -> Arc<GraphicsPipeline> {
     let specialization_constants =
@@ -246,12 +245,11 @@ fn get_pipelines(
     vs: Arc<ShaderModule>,
     fs: Arc<ShaderModule>,
     render_pass: Arc<RenderPass>,
-    viewport: Viewport,
 ) -> [Arc<GraphicsPipeline>; 3] {
     [
-        get_pipeline(&device, &vs, &fs, &render_pass, &viewport, Specialization::Phong),
-        get_pipeline(&device, &vs, &fs, &render_pass, &viewport, Specialization::Toon),
-        get_pipeline(&device, &vs, &fs, &render_pass, &viewport, Specialization::Textured),
+        get_pipeline(&device, &vs, &fs, &render_pass, Specialization::Phong),
+        get_pipeline(&device, &vs, &fs, &render_pass, Specialization::Toon),
+        get_pipeline(&device, &vs, &fs, &render_pass, Specialization::Textured),
     ]
 }
 
@@ -288,7 +286,7 @@ pub fn main() {
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
 
-    let meshes_from_file = Model::load("./assets/models/color_teapot_spheres.gltf").meshes;
+    let meshes_from_file = Model::load("./data/models/color_teapot_spheres.gltf").meshes;
 
     let mut scene_objects = vec![];
 
@@ -305,14 +303,7 @@ pub fn main() {
         },
     ).unwrap();
 
-    // Create pipeline
-
-    let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
-    let mut viewport = Viewport {
-        origin: [0.0, 0.0],
-        dimensions: window.inner_size().into(),
-        depth_range: 0.0..1.0,
-    };
+    // Create pipelines
 
     let vs_shader = vs::load(app.device.clone()).unwrap();
     let fs_shader = fs::load(app.device.clone()).unwrap();
@@ -321,7 +312,6 @@ pub fn main() {
         vs_shader.clone(),
         fs_shader.clone(),
         render_pass.clone(),
-        viewport.clone(),
     );
 
     let layout = pipelines[0].layout().set_layouts().get(0).unwrap();
@@ -334,7 +324,7 @@ pub fn main() {
         .unwrap();
 
     let metal_texture = {
-        let metal_texture = include_bytes!("../../assets/textures/metalplate_nomips_rgba.ktx").to_vec();
+        let metal_texture = include_bytes!("../../data/textures/metalplate_nomips_rgba.ktx").to_vec();
         let cursor = Cursor::new(metal_texture);
         let decoder = ktx::Decoder::new(cursor).unwrap();
         let width = decoder.pixel_width();
@@ -468,13 +458,11 @@ pub fn main() {
                     app.swapchain = new_swapchain;
                     framebuffers = app.get_framebuffers(&memory_allocator, &new_images, &render_pass);
 
-                    viewport.dimensions = window.inner_size().into();
                     pipelines = get_pipelines(
                         app.device.clone(),
                         vs_shader.clone(),
                         fs_shader.clone(),
                         render_pass.clone(),
-                        viewport.clone(),
                     );
 
                     let [width, height] = app.swapchain.image_extent();

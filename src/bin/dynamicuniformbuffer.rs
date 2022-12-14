@@ -271,6 +271,7 @@ pub fn main() {
     // Create empty buffer of exactly as many bytes as calculated
     let aligned_data = vec![0u8; buffer_size];
 
+    // This buffer will be used later to store the model matrices of the cubes
     let dynamic_model_buffer = CpuAccessibleBuffer::from_iter(
         memory_allocator.as_ref(),
         BufferUsage::UNIFORM_BUFFER,
@@ -297,6 +298,9 @@ pub fn main() {
         layout.clone(),
         [
             WriteDescriptorSet::buffer(0, view_projection_buffer.clone()),
+            // dynamic uniform buffers need a buffer with range.
+            // The range specifies the byte index of the first element and the size of one element in bytes.
+            // It does not specify the range of the whole buffer!
             WriteDescriptorSet::buffer_with_range(1, dynamic_model_buffer.clone(), 0..size_of::<Mat4>() as DeviceSize),
         ],
     ).unwrap();
@@ -358,6 +362,7 @@ pub fn main() {
                                 {
                                     let index = (x * dim * dim + y * dim + z) as usize;
 
+                                    // reinterpret the raw bytes of the dynamic_model_buffer as a slice of Mat4
                                     let model_mat: &mut [Mat4] = bytemuck::cast_slice_mut(&mut dmb[index * dynamic_alignment..(index * dynamic_alignment + dynamic_alignment)]);
 
                                     // Update rotations
@@ -508,7 +513,7 @@ fn get_command_buffers(
             for i in 0..INSTANCES {
                 let offset = (i * dynamic_align) as u32;
                 builder
-                    // bind descriptorset at offset for current instance
+                    // bind descriptorset at offset for current instance, offset again in bytes!
                     .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline.layout().clone(), 0,
                                           vec![dynamic_set.clone().offsets([offset])],
                     )
