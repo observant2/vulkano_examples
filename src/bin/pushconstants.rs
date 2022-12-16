@@ -184,7 +184,7 @@ pub fn main() {
 
     let mut example = Example::new();
 
-    let vertices = example.model.meshes[0].vertices.iter().map(|v| Vertex {
+    let vertices = example.model.meshes[0].primitives[0].vertices.iter().map(|v| Vertex {
         position: *v
     });
 
@@ -200,7 +200,7 @@ pub fn main() {
         memory_allocator.as_ref(),
         BufferUsage::INDEX_BUFFER,
         false,
-        example.model.meshes.remove(0).indices.into_iter(),
+        example.model.meshes.remove(0).primitives.remove(0).indices.into_iter(),
     ).expect("failed to create index buffer");
 
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();

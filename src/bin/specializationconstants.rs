@@ -286,10 +286,6 @@ pub fn main() {
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
 
-    let meshes_from_file = Model::load("./data/models/color_teapot_spheres.gltf").meshes;
-
-    let mut scene_objects = vec![];
-
     // Create buffers for descriptorset 0, binding 0
 
     let ubo_buffer = CpuAccessibleBuffer::from_data(
@@ -359,46 +355,51 @@ pub fn main() {
         ],
     ).unwrap();
 
-
-    for mesh in meshes_from_file {
-        let vertices: Vec<Vertex> = mesh.vertices.iter()
-            .zip(mesh.tex_coords.iter())
-            .zip(mesh.normals.iter())
-            .zip(mesh.colors.iter())
-            .map(|(((v, t), n), c)| Vertex {
-                position: *v,
-                normal: *n,
-                uv: *t,
-                color: *c,
-            }).collect();
-
-        let vertex_buffer = CpuAccessibleBuffer::from_iter(
-            memory_allocator.as_ref(),
-            BufferUsage::VERTEX_BUFFER,
-            false,
-            vertices,
-        )
-            .expect("failed to create buffer");
-
-        let index_buffer = CpuAccessibleBuffer::from_iter(
-            memory_allocator.as_ref(),
-            BufferUsage::INDEX_BUFFER,
-            false,
-            mesh.indices,
-        ).expect("failed to create index buffer");
-
-        scene_objects.push(SceneObject {
-            vertex_buffer,
-            index_buffer,
-        })
-    }
-
     let _ = uploads
         .build()
         .unwrap()
         .execute(app.queue.clone())
         .unwrap()
         .then_signal_fence_and_flush();
+
+    let meshes_from_file = Model::load("./data/models/color_teapot_spheres.gltf").meshes;
+
+    let mut scene_objects = vec![];
+
+    for mesh in meshes_from_file {
+        for primitive in mesh.primitives {
+            let vertices: Vec<Vertex> = primitive.vertices.iter()
+                .zip(primitive.tex_coords.iter())
+                .zip(primitive.normals.iter())
+                .zip(primitive.colors.iter())
+                .map(|(((v, t), n), c)| Vertex {
+                    position: *v,
+                    normal: *n,
+                    uv: *t,
+                    color: *c,
+                }).collect();
+
+            let vertex_buffer = CpuAccessibleBuffer::from_iter(
+                memory_allocator.as_ref(),
+                BufferUsage::VERTEX_BUFFER,
+                false,
+                vertices,
+            )
+                .expect("failed to create buffer");
+
+            let index_buffer = CpuAccessibleBuffer::from_iter(
+                memory_allocator.as_ref(),
+                BufferUsage::INDEX_BUFFER,
+                false,
+                primitive.indices,
+            ).expect("failed to create index buffer");
+
+            scene_objects.push(SceneObject {
+                vertex_buffer,
+                index_buffer,
+            })
+        }
+    }
 
     let mut command_buffers = get_command_buffers(&app, &pipelines, &framebuffers, &scene_objects, &descriptor_set);
 

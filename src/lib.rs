@@ -46,7 +46,7 @@ pub struct App {
 impl App {
     pub fn new(title: &str) -> (Self, EventLoop<()>) {
         let library = VulkanLibrary::new().expect("no local Vulkan library/DLL");
-        let required_extensions = vulkano_win::required_extensions(library.clone().as_ref());
+        let required_extensions = vulkano_win::required_extensions(library.as_ref());
         let instance = Instance::new(
             library,
             InstanceCreateInfo {

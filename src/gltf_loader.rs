@@ -9,11 +9,15 @@ pub struct Model {
 }
 
 pub struct Mesh {
+    pub transform: Option<Mat4>,
+    pub primitives: Vec<Primitive>,
+}
+
+pub struct Primitive {
     pub vertices: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub tex_coords: Vec<[f32; 2]>,
     pub indices: Vec<u16>,
-    pub transform: Option<Mat4>,
     pub colors: Vec<[f32; 4]>,
 }
 
@@ -24,13 +28,14 @@ impl Model {
         let mut meshes: Vec<Mesh> = vec![];
 
         for mesh in model.meshes() {
-            let mut vertices = Vec::<[f32; 3]>::new();
-            let mut normals = Vec::<[f32; 3]>::new();
-            let mut tex_coords = Vec::<[f32; 2]>::new();
-            let mut colors = Vec::<[f32; 4]>::new();
-            let mut indices = Vec::<u16>::new();
-
+            let mut primitives: Vec<Primitive> = vec![];
             for primitive in mesh.primitives() {
+                let mut vertices = Vec::<[f32; 3]>::new();
+                let mut normals = Vec::<[f32; 3]>::new();
+                let mut tex_coords = Vec::<[f32; 2]>::new();
+                let mut colors = Vec::<[f32; 4]>::new();
+                let mut indices = Vec::<u16>::new();
+
                 for attr in primitive.attributes() {
                     if attr.0 == Semantic::Positions {
                         if attr.1.dimensions() != Dimensions::Vec3 {
@@ -84,24 +89,28 @@ impl Model {
                 }
 
                 colors.push(primitive.material().pbr_metallic_roughness().base_color_factor());
-            }
 
-            if tex_coords.len() < vertices.len() {
-                for _ in 0..vertices.len() {
-                    tex_coords.push([0.0, 0.0]);
+                if tex_coords.len() < vertices.len() {
+                    for _ in 0..vertices.len() {
+                        tex_coords.push([0.0, 0.0]);
+                    }
                 }
-            }
 
-            if colors.len() < vertices.len() {
-                colors.resize(vertices.len(), colors[0]);
+                if colors.len() < vertices.len() {
+                    colors.resize(vertices.len(), colors[0]);
+                }
+
+                primitives.push(Primitive {
+                    tex_coords,
+                    indices,
+                    vertices,
+                    normals,
+                    colors,
+                });
             }
 
             meshes.push(Mesh {
-                tex_coords,
-                indices,
-                vertices,
-                normals,
-                colors,
+                primitives,
                 transform: None,
             })
         }
@@ -109,11 +118,13 @@ impl Model {
         for n in model.nodes() {
             if let Some(mesh) = n.mesh() {
                 // node applies to mesh
-                for v in &mut meshes[mesh.index()].vertices {
-                    let res: Vec4 = (Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0));
-                    // bruuuh
-                    let arr = res.data.0[0];
-                    *v = [arr[0], arr[1], arr[2]];
+                for p in &mut meshes[mesh.index()].primitives {
+                    for v in &mut p.vertices {
+                        let res: Vec4 = (Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0));
+                        // bruuuh
+                        let arr = res.data.0[0];
+                        *v = [arr[0], arr[1], arr[2]];
+                    }
                 }
             }
         }
@@ -121,11 +132,13 @@ impl Model {
         for n in model.nodes() {
             for c in n.children() {
                 if let Some(mesh) = c.mesh() {
-                    for v in &mut meshes[mesh.index()].vertices {
-                        let res: Vec4 = (Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0));
-                        // bruuuh
-                        let arr = res.data.0[0];
-                        *v = [arr[0], arr[1], arr[2]];
+                    for m in &mut meshes[mesh.index()].primitives {
+                        for v in &mut m.vertices {
+                            let res: Vec4 = (Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0));
+                            // bruuuh
+                            let arr = res.data.0[0];
+                            *v = [arr[0], arr[1], arr[2]];
+                        }
                     }
                 }
             }

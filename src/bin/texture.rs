@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::process::id;
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use ktx::KtxInfo;
-use nalgebra_glm::{identity, Mat4, rotate, scale, translate, vec3, Vec3, Vec4};
+use nalgebra_glm::{identity, Mat4, vec3, Vec4};
 use vulkano::{swapchain, sync};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassContents};
