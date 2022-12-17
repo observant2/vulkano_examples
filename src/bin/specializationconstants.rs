@@ -295,7 +295,7 @@ pub fn main() {
         UBO {
             view: identity(),
             projection: identity(),
-            light_pos: vec4(0.0, 2.0, 1.0, 0.0),
+            light_pos: vec4(0.0, -2.0, 1.0, 0.0),
         },
     ).unwrap();
 
@@ -362,7 +362,7 @@ pub fn main() {
         .unwrap()
         .then_signal_fence_and_flush();
 
-    let meshes_from_file = Model::load("./data/models/color_teapot_spheres.gltf").meshes;
+    let meshes_from_file = Model::load("./data/models/color_teapot_spheres.gltf", true).meshes;
 
     let mut scene_objects = vec![];
 

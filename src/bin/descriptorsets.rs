@@ -69,7 +69,7 @@ struct Example {
 
 impl Example {
     fn new() -> Self {
-        let model = Model::load("./data/models/cube.gltf");
+        let model = Model::load("./data/models/cube.gltf", false);
 
         let mut cubes = vec![];
 

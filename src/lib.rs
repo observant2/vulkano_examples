@@ -8,7 +8,7 @@ use vulkano::command_buffer::allocator::{
     StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
 };
 use vulkano::device::physical::PhysicalDeviceType;
-use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags};
+use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{AttachmentImage, ImageAccess, ImageUsage, SwapchainImage};
@@ -65,6 +65,7 @@ impl App {
 
         let device_extensions = DeviceExtensions {
             khr_swapchain: true,
+            khr_separate_depth_stencil_layouts: true,
             ..Default::default()
         };
         let (physical, queue_family_index) = instance
@@ -96,12 +97,15 @@ impl App {
         let (device, mut queues) = Device::new(
             physical.clone(),
             DeviceCreateInfo {
-                // here we pass the desired queue family to use by index
                 queue_create_infos: vec![QueueCreateInfo {
                     queue_family_index,
                     ..Default::default()
                 }],
                 enabled_extensions: device_extensions,
+                enabled_features: Features {
+                    separate_depth_stencil_layouts: true,
+                    ..Features::default()
+                },
                 ..Default::default()
             },
         )

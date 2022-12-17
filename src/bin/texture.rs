@@ -415,7 +415,7 @@ pub fn main() {
                     if let Ok(mut ubo) = ubo_buffer.write() {
                         ubo.model_view = camera.get_view_matrix();
                         ubo.projection = camera.get_perspective_matrix();
-                        ubo.camera_pos = Vec4::from_data(camera.position.xyz().push(1.0).data);
+                        ubo.camera_pos = Vec4::from_data(camera.get_position().push(1.0).data);
                         ubo.camera_pos.x *= -1.0;
                         ubo.camera_pos.z *= -1.0;
                     }

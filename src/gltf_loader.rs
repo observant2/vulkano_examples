@@ -1,15 +1,13 @@
 use gltf::accessor::Dimensions;
 use gltf::json::accessor::ComponentType;
-use gltf::scene::Transform;
 use gltf::Semantic;
-use nalgebra_glm::{Mat4, vec4, Vec4};
+use nalgebra_glm::{Mat3, Mat4, mat4_to_mat3, vec3, Vec3, vec4, Vec4};
 
 pub struct Model {
     pub meshes: Vec<Mesh>,
 }
 
 pub struct Mesh {
-    pub transform: Option<Mat4>,
     pub primitives: Vec<Primitive>,
 }
 
@@ -22,7 +20,7 @@ pub struct Primitive {
 }
 
 impl Model {
-    pub fn load(path: &str) -> Model {
+    pub fn load(path: &str, flip_y: bool) -> Model {
         let (model, buffers, _) = gltf::import(path).unwrap_or_else(|_| panic!("couldn't load model at: {}", path));
 
         let mut meshes: Vec<Mesh> = vec![];
@@ -35,6 +33,7 @@ impl Model {
                 let mut tex_coords = Vec::<[f32; 2]>::new();
                 let mut colors = Vec::<[f32; 4]>::new();
                 let mut indices = Vec::<u16>::new();
+
 
                 for attr in primitive.attributes() {
                     if attr.0 == Semantic::Positions {
@@ -61,7 +60,8 @@ impl Model {
                             let buffer_view = accessor.view().unwrap();
                             let contents: &[f32] = bytemuck::cast_slice(&buffers[0][buffer_view.offset()..][..buffer_view.length()]);
                             for i in (0..accessor.count() * 3).step_by(3) {
-                                normals.push([contents[i], contents[i + 1], contents[i + 2], ]);
+                                let normal = vec3(contents[i], contents[i + 1], contents[i + 2]).normalize();
+                                normals.push(normal.into());
                             }
                         }
                     } else if attr.0 == Semantic::TexCoords(0) {
@@ -111,7 +111,6 @@ impl Model {
 
             meshes.push(Mesh {
                 primitives,
-                transform: None,
             })
         }
 
@@ -120,10 +119,16 @@ impl Model {
                 // node applies to mesh
                 for p in &mut meshes[mesh.index()].primitives {
                     for v in &mut p.vertices {
-                        let res: Vec4 = (Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0));
+                        let res: Vec4 = Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0);
                         // bruuuh
                         let arr = res.data.0[0];
                         *v = [arr[0], arr[1], arr[2]];
+                    }
+                    for normal in &mut p.normals {
+                        let res: Vec3 = (mat4_to_mat3(&Mat4::from(n.transform().matrix())) * vec3(normal[0], normal[1], normal[2])).normalize();
+                        // bruuuh
+                        let arr = res.data.0[0];
+                        *normal = [arr[0], arr[1], arr[2]];
                     }
                 }
             }
@@ -134,11 +139,30 @@ impl Model {
                 if let Some(mesh) = c.mesh() {
                     for m in &mut meshes[mesh.index()].primitives {
                         for v in &mut m.vertices {
-                            let res: Vec4 = (Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0));
+                            let res: Vec4 = Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0);
                             // bruuuh
                             let arr = res.data.0[0];
                             *v = [arr[0], arr[1], arr[2]];
                         }
+                        for normal in &mut m.normals {
+                            let res: Vec3 = (mat4_to_mat3(&Mat4::from(n.transform().matrix())) * vec3(normal[0], normal[1], normal[2])).normalize();
+                            // bruuuh
+                            let arr = res.data.0[0];
+                            *normal = [arr[0], arr[1], arr[2]];
+                        }
+                    }
+                }
+            }
+        }
+
+        if flip_y {
+            for m in &mut meshes {
+                for p in &mut m.primitives {
+                    for v in &mut p.vertices {
+                        v[1] *= -1.0;
+                    }
+                    for n in &mut p.normals {
+                        n[1] *= -1.0;
                     }
                 }
             }

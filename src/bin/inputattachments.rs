@@ -3,18 +3,19 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
-use nalgebra_glm::{identity, Mat4, rotate, translate, vec3, Vec3};
-use rand::Rng;
-use vulkano::{swapchain, sync, DeviceSize};
+use egui_winit_vulkano::{egui, Gui};
+use egui_winit_vulkano::egui::{Color32, WidgetText};
+use nalgebra_glm::{identity, Mat4, Vec2, vec2, vec3};
+use vulkano::{swapchain, sync};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
-use vulkano::descriptor_set::{DescriptorSet, PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType};
 use vulkano::device::Device;
 use vulkano::format::{ClearValue, Format};
-use vulkano::image::{AttachmentImage, ImageAccess, SwapchainImage};
-use vulkano::image::view::ImageView;
+use vulkano::image::{AttachmentImage, ImageAccess, ImageAspect, ImageAspects, ImageSubresourceRange, ImageUsage, SwapchainImage};
+use vulkano::image::view::{ImageView, ImageViewCreateInfo};
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
@@ -33,17 +34,29 @@ use winit::event_loop::ControlFlow;
 use winit::window::Window;
 
 use vulkano_examples::App;
-use vulkano_examples::camera::Camera;
+use vulkano_examples::camera::{Camera, CameraType};
 use vulkano_examples::gltf_loader::Model;
 
-const INSTANCES: usize = 125;
+#[derive(PartialEq)]
+enum AttachmentChoice {
+    BrightnessContrast,
+    DepthBuffer,
+}
+
+struct Example {
+    brightness: f32,
+    contrast: f32,
+    range: Vec2,
+    current_attachment: AttachmentChoice,
+    postprocessing_buffer: Arc<CpuAccessibleBuffer<UBO>>,
+}
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
-pub struct Vertex {
-    pub position: [f32; 3],
-    pub color: [f32; 3],
-    pub normal: [f32; 3],
+struct Vertex {
+    position: [f32; 3],
+    color: [f32; 3],
+    normal: [f32; 3],
 }
 
 vulkano::impl_vertex!(Vertex, position, color, normal);
@@ -55,12 +68,20 @@ struct ViewProjection {
     projection: Mat4,
 }
 
+#[repr(C)]
+#[derive(Default, Copy, Clone, Zeroable, Pod)]
+struct UBO {
+    brightness_contrast: Vec2,
+    range: Vec2,
+    attachment_index: i32,
+}
+
 struct SceneObject {
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
     index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
 }
 
-mod vs {
+mod vs_write {
     vulkano_shaders::shader! {
             ty: "vertex",
             src: "
@@ -78,18 +99,22 @@ layout (set = 0, binding = 0) uniform ViewProjection
 
 layout (location = 0) out vec3 outColor;
 layout (location = 1) out vec3 outNormal;
+layout (location = 2) out vec3 outViewVec;
+layout (location = 3) out vec3 outLightVec;
 
 void main()
 {
-	outColor = color;
 	gl_Position =  ubo.projection * ubo.view * vec4(position, 1.0);
+	outColor = color;
     outNormal = normal;
+	outLightVec = vec3(0.0f, 5.0f, 15.0f) - position;
+	outViewVec = -position.xyz;
 }
 "
     }
 }
 
-mod fs {
+mod fs_write {
     vulkano_shaders::shader! {
         ty: "fragment",
         src: "
@@ -97,33 +122,119 @@ mod fs {
 
 layout (location = 0) in vec3 inColor;
 layout (location = 1) in vec3 inNormal;
+layout (location = 2) in vec3 inViewVec;
+layout (location = 3) in vec3 inLightVec;
 
-layout (location = 0) out vec4 outFragColor;
+layout (location = 0) out vec4 outColor;
 
 void main()
 {
-	outFragColor = vec4(inColor, 1.0);
+	// Toon shading color attachment output
+	float intensity = dot(normalize(inNormal), normalize(inLightVec));
+	float shade = 1.0;
+	shade = intensity < 0.5 ? 0.75 : shade;
+	shade = intensity < 0.35 ? 0.6 : shade;
+	shade = intensity < 0.25 ? 0.5 : shade;
+	shade = intensity < 0.1 ? 0.25 : shade;
+
+	outColor.rgb = inColor * 3.0 * shade;
+
+	// Depth attachment does not need to be explicitly written
 }
 "
     }
 }
 
+mod vs_read {
+    vulkano_shaders::shader! {
+            ty: "vertex",
+            src: "
+#version 450
+
+out gl_PerVertex {
+	vec4 gl_Position;
+};
+
+void main()
+{
+    // TODO: explain this black magic!
+	gl_Position = vec4(vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2) * 2.0f - 1.0f, 0.0f, 1.0f);
+}
+"
+    }
+}
+
+mod fs_read {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        src: "
+#version 450
+
+layout (input_attachment_index = 0, binding = 0) uniform subpassInput inputColor;
+layout (input_attachment_index = 1, binding = 1) uniform subpassInput inputDepth;
+
+layout (binding = 2) uniform UBO {
+	vec2 brightnessContrast;
+	vec2 range;
+	int attachmentIndex;
+} ubo;
+
+layout (location = 0) out vec4 outColor;
+
+vec3 brightnessContrast(vec3 color, float brightness, float contrast) {
+	return (color - 0.5) * contrast + 0.5 + brightness;
+}
+
+void main()
+{
+	// Apply brightness and contrast filer to color input
+	if (ubo.attachmentIndex == 0) {
+		// Read color from previous color input attachment
+		vec3 color = subpassLoad(inputColor).rgb;
+		outColor.rgb = brightnessContrast(color, ubo.brightnessContrast[0], ubo.brightnessContrast[1]);
+	}
+
+	// Visualize depth input range
+	if (ubo.attachmentIndex == 1) {
+		// Read depth from previous depth input attachment
+		float depth = subpassLoad(inputDepth).r;
+		outColor.rgb = vec3((depth - ubo.range[0]) /
+		                (ubo.range[1] - ubo.range[0]));
+	}
+}
+"
+    }
+}
+
+const DEPTH_FORMAT: Format = Format::D24_UNORM_S8_UINT;
 
 fn get_framebuffers(memory_allocator: &Arc<StandardMemoryAllocator>, images: &[Arc<SwapchainImage>], render_pass: &Arc<RenderPass>) -> Vec<Arc<Framebuffer>> {
     images
         .iter()
         .map(|image| {
             let color = ImageView::new_default(image.clone()).unwrap();
-            // let color_write = ImageView::new_default(
-            //     AttachmentImage::input_attachment(memory_allocator, image.dimensions().width_height(), image.format()).unwrap()
-            // ).unwrap();
-            let depth_buffer = ImageView::new_default(
-                AttachmentImage::transient(memory_allocator, image.dimensions().width_height(), Format::D24_UNORM_S8_UINT).unwrap()
+            let color_write = ImageView::new_default(
+                AttachmentImage::with_usage(memory_allocator,
+                                            image.dimensions().width_height(), image.format(),
+                                            ImageUsage::TRANSIENT_ATTACHMENT | ImageUsage::INPUT_ATTACHMENT).unwrap()
+            ).unwrap();
+
+            let depth_image = AttachmentImage::with_usage(memory_allocator,
+                                                          image.dimensions().width_height(), DEPTH_FORMAT,
+                                                          ImageUsage::TRANSIENT_ATTACHMENT | ImageUsage::INPUT_ATTACHMENT).unwrap();
+            let depth_buffer = ImageView::new(depth_image.clone(),
+                                              ImageViewCreateInfo {
+                                                  subresource_range: ImageSubresourceRange {
+                                                      aspects: ImageAspects::DEPTH,
+                                                      ..image.subresource_range()
+                                                  },
+                                                  ..ImageViewCreateInfo::from_image(&depth_image)
+                                              },
             ).unwrap();
             Framebuffer::new(
                 render_pass.clone(),
                 FramebufferCreateInfo {
-                    attachments: vec![color /*, color_write */, depth_buffer],
+                    attachments: vec![color, color_write, depth_buffer],
                     ..Default::default()
                 },
             )
@@ -132,7 +243,7 @@ fn get_framebuffers(memory_allocator: &Arc<StandardMemoryAllocator>, images: &[A
         .collect::<Vec<_>>()
 }
 
-fn get_pipeline(
+fn get_pipeline_write(
     device: Arc<Device>,
     vs: Arc<ShaderModule>,
     fs: Arc<ShaderModule>,
@@ -147,14 +258,40 @@ fn get_pipeline(
         .fragment_shader(fs.entry_point("main").unwrap(), ())
         .depth_stencil_state(DepthStencilState::simple_depth_test())
         .render_pass(Subpass::from(render_pass, 0).unwrap())
+        .build(device).unwrap()
+}
+
+fn get_pipeline_read(
+    device: Arc<Device>,
+    vs: Arc<ShaderModule>,
+    fs: Arc<ShaderModule>,
+    render_pass: Arc<RenderPass>,
+    viewport: Viewport,
+) -> Arc<GraphicsPipeline> {
+    GraphicsPipeline::start()
+        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
+        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .depth_stencil_state(DepthStencilState::simple_depth_test())
+        .render_pass(Subpass::from(render_pass, 1).unwrap())
         .with_pipeline_layout(device.clone(), PipelineLayout::new(device.clone(), PipelineLayoutCreateInfo {
             set_layouts: vec![
-                DescriptorSetLayout::new(device, DescriptorSetLayoutCreateInfo {
+                DescriptorSetLayout::new(device.clone(), DescriptorSetLayoutCreateInfo {
                     bindings: BTreeMap::from([
                         (0, DescriptorSetLayoutBinding {
-                            stages: ShaderStages::VERTEX,
+                            stages: ShaderStages::FRAGMENT,
+                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::InputAttachment)
+                        }),
+                        (1, DescriptorSetLayoutBinding {
+                            stages: ShaderStages::FRAGMENT,
+                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::InputAttachment)
+                        }),
+                        (2, DescriptorSetLayoutBinding {
+                            stages: ShaderStages::FRAGMENT,
                             ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBuffer)
-                        })
+                        }),
                     ]),
                     ..DescriptorSetLayoutCreateInfo::default()
                 }).unwrap()
@@ -180,29 +317,30 @@ pub fn main() {
                 format: color_format,
                 samples: 1,
             },
-            // color_write: {
-            //     load: Clear,
-            //     store: DontCare,
-            //     format: color_format,
-            //     samples: 1,
-            // },
+            color_write: {
+                load: Clear,
+                store: DontCare,
+                format: color_format,
+                samples: 1,
+            },
             depth: {
                 load: Clear,
                 store: DontCare,
-                format: Format::D24_UNORM_S8_UINT,
+                format: DEPTH_FORMAT,
                 samples: 1,
             }
         },
-        passes: [{
-            color: [color],
+        passes: [
+        {// regular rendering
+            color: [color_write],
             depth_stencil: {depth},
             input: []
-        //},
-        // {
-        //     color: [color],
-        //     depth_stencil: {},
-        //     input: [color_write]
-         }]
+        },
+        {// post processing
+            color: [color],
+            depth_stencil: {},
+            input: [color_write, depth]
+        }]
     )
         .unwrap();
 
@@ -211,7 +349,7 @@ pub fn main() {
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
 
-    let meshes_from_file = Model::load("./data/models/treasure_smooth.gltf").meshes;
+    let meshes_from_file = Model::load("./data/models/treasure_smooth.gltf", true).meshes;
 
     let mut scene_objects = vec![];
 
@@ -248,8 +386,7 @@ pub fn main() {
         }
     }
 
-    // Create pipeline
-
+    // Create pipeline write
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
     let mut viewport = Viewport {
         origin: [0.0, 0.0],
@@ -257,9 +394,9 @@ pub fn main() {
         depth_range: 0.0..1.0,
     };
 
-    let vs_shader = vs::load(app.device.clone()).unwrap();
-    let fs_shader = fs::load(app.device.clone()).unwrap();
-    let mut pipeline = get_pipeline(
+    let vs_shader = vs_write::load(app.device.clone()).unwrap();
+    let fs_shader = fs_write::load(app.device.clone()).unwrap();
+    let mut pipeline_write = get_pipeline_write(
         app.device.clone(),
         vs_shader.clone(),
         fs_shader.clone(),
@@ -277,7 +414,7 @@ pub fn main() {
         },
     ).unwrap();
 
-    let layout = pipeline.layout().set_layouts().get(0).unwrap();
+    let layout = pipeline_write.layout().set_layouts().get(0).unwrap();
     let descriptor_allocator = StandardDescriptorSetAllocator::new(app.device.clone());
 
     let view_projection_set = PersistentDescriptorSet::new(
@@ -288,8 +425,44 @@ pub fn main() {
         ],
     ).unwrap();
 
+    let mut example = Example {
+        brightness: 0.5,
+        contrast: 1.8,
+        range: vec2(0.98, 1.0),
+        current_attachment: AttachmentChoice::BrightnessContrast,
+        postprocessing_buffer: CpuAccessibleBuffer::from_data(
+            memory_allocator.as_ref(),
+            BufferUsage::UNIFORM_BUFFER,
+            false,
+            UBO {
+                brightness_contrast: vec2(0.5, 1.8),
+                range: vec2(0.0, 1.0),
+                attachment_index: 0,
+            },
+        ).unwrap(),
+    };
 
-    let mut command_buffers = get_command_buffers(&app, &pipeline, &framebuffers, &scene_objects, &view_projection_set);
+    // Create pipeline read
+    let pipeline_read = get_pipeline_read(
+        app.device.clone(),
+        vs_read::load(app.device.clone()).unwrap(),
+        fs_read::load(app.device.clone()).unwrap(),
+        render_pass.clone(),
+        viewport.clone(),
+    );
+
+    let layout_read = pipeline_read.layout().set_layouts().get(0).unwrap();
+    let postprocessing_sets: Vec<_> = framebuffers.iter().map(|f: &Arc<Framebuffer>| {
+        PersistentDescriptorSet::new(
+            &descriptor_allocator,
+            layout_read.clone(),
+            [
+                WriteDescriptorSet::image_view(0, f.attachments()[1].clone()), // color
+                WriteDescriptorSet::image_view(1, f.attachments()[2].clone()), // depth
+                WriteDescriptorSet::buffer(2, example.postprocessing_buffer.clone()),
+            ]).unwrap()
+    }).collect();
+
 
     let mut recreate_swapchain = true;
 
@@ -297,12 +470,35 @@ pub fn main() {
 
     let mut previous_frame_end = Some(sync::now(app.device.clone()).boxed());
 
-    let mut camera = Camera::new(vec3(0.0, 0.0, -30.0), aspect_ratio, f32::to_radians(60.0), 0.01, 256.0);
+    let mut camera = Camera::new(vec3(1.65, 1.75, -6.15), aspect_ratio, f32::to_radians(60.0), 0.1, 256.0);
+    camera.set_rotation(vec3(-12.75, 380.0, 0.0));
+    camera.camera_type = CameraType::FirstPerson;
+
+    let mut gui = {
+        Gui::new(
+            &event_loop,
+            app.surface.clone(),
+            Some(color_format),
+            app.queue.clone(),
+            true,
+        )
+    };
+
+    let mut command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &scene_objects, &view_projection_set, &postprocessing_sets);
 
     event_loop.run(move |event, _, control_flow| {
-        camera.handle_input(&event);
+        if let Event::WindowEvent {
+            event: e,
+            ..
+        } = &event {
+            if !gui.update(e) {
+                camera.handle_input(&event);
+            }
+        } else {
+            camera.handle_input(&event);
+        }
 
-        match event {
+        match &event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
@@ -315,18 +511,28 @@ pub fn main() {
             } => {
                 recreate_swapchain = true;
             }
-            Event::MainEventsCleared => {
-                camera.update_view_matrix();
-            }
             Event::RedrawRequested(..) => {
                 let elapsed = last_frame.elapsed().as_millis();
                 if elapsed < (1000.0 / 60.0) as u128 {
                     return;
                 } else {
+                    camera.update(elapsed as f32);
                     last_frame = Instant::now();
                 }
 
                 previous_frame_end.as_mut().unwrap().cleanup_finished();
+
+                gui.immediate_ui(|gui: &mut Gui| {
+                    create_ui(gui, &mut example);
+                });
+
+                {
+                    if let Ok(mut ubo) = example.postprocessing_buffer.write() {
+                        ubo.brightness_contrast = vec2(example.brightness, example.contrast);
+                        ubo.range = vec2(example.range.x, example.range.y);
+                        ubo.attachment_index = if example.current_attachment == AttachmentChoice::BrightnessContrast { 0 } else { 1 };
+                    }
+                }
 
                 let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
 
@@ -342,13 +548,20 @@ pub fn main() {
                         }) {
                             Ok(r) => r,
                             Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
-                            Err(e) => panic!("failed to recreate swapchain: {:?}", e),
+                            Err(e) => panic!("failed to recreate swapchain: {e:?}"),
                         };
                     app.swapchain = new_swapchain;
-                    framebuffers = app.get_framebuffers(&memory_allocator, &new_images, &render_pass);
+                    app.swapchain_images = new_images;
+
+
+                    let aspect_ratio =
+                        app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
+                    camera.set_perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
+
+                    framebuffers = get_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
 
                     viewport.dimensions = window.inner_size().into();
-                    pipeline = get_pipeline(
+                    pipeline_write = get_pipeline_write(
                         app.device.clone(),
                         vs_shader.clone(),
                         fs_shader.clone(),
@@ -356,11 +569,27 @@ pub fn main() {
                         viewport.clone(),
                     );
 
-                    let aspect_ratio =
-                        app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
-                    camera.set_perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
+                    let pipeline_read = get_pipeline_read(
+                        app.device.clone(),
+                        vs_read::load(app.device.clone()).unwrap(),
+                        fs_read::load(app.device.clone()).unwrap(),
+                        render_pass.clone(),
+                        viewport.clone(),
+                    );
 
-                    command_buffers = get_command_buffers(&app, &pipeline, &framebuffers, &scene_objects, &view_projection_set);
+                    let layout_read = pipeline_read.layout().set_layouts().get(0).unwrap();
+                    let postprocessing_sets: Vec<_> = framebuffers.iter().map(|f: &Arc<Framebuffer>| {
+                        PersistentDescriptorSet::new(
+                            &descriptor_allocator,
+                            layout_read.clone(),
+                            [
+                                WriteDescriptorSet::image_view(0, f.attachments()[1].clone()), // color
+                                WriteDescriptorSet::image_view(1, f.attachments()[2].clone()), // depth
+                                WriteDescriptorSet::buffer(2, example.postprocessing_buffer.clone()),
+                            ]).unwrap()
+                    }).collect();
+
+                    command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &scene_objects, &view_projection_set, &postprocessing_sets);
 
                     recreate_swapchain = false;
                 }
@@ -368,9 +597,7 @@ pub fn main() {
                 {
                     let view_projection = view_projection_buffer.write();
 
-                    if view_projection.is_ok() {
-                        let mut view_projection = view_projection.unwrap();
-
+                    if let Ok(mut view_projection) = view_projection {
                         view_projection.view = camera.get_view_matrix();
                         view_projection.projection = camera.get_perspective_matrix();
                     }
@@ -382,23 +609,29 @@ pub fn main() {
                         Err(AcquireError::OutOfDate) => {
                             return;
                         }
-                        Err(e) => panic!("failed to acquire next image: {:?}", e),
+                        Err(e) => panic!("failed to acquire next image: {e:?}"),
                     };
 
                 if suboptimal {
                     recreate_swapchain = true;
                 }
 
+                // execute command buffers
                 let future = previous_frame_end
                     .take()
                     .unwrap()
                     .join(acquire_future)
                     .then_execute(app.queue.clone(), command_buffers[image_i as usize].clone())
-                    .unwrap()
-                    .then_swapchain_present(
-                        app.queue.clone(),
-                        SwapchainPresentInfo::swapchain_image_index(app.swapchain.clone(), image_i),
-                    )
+                    .unwrap();
+
+                // draw UI
+                let future = gui.draw_on_image(future, ImageView::new_default(app.swapchain_images[image_i as usize].clone()).unwrap());
+
+                // present
+                let future = future.then_swapchain_present(
+                    app.queue.clone(),
+                    SwapchainPresentInfo::swapchain_image_index(app.swapchain.clone(), image_i),
+                )
                     .then_signal_fence_and_flush();
 
                 match future {
@@ -410,7 +643,7 @@ pub fn main() {
                         previous_frame_end = Some(sync::now(app.device.clone()).boxed());
                     }
                     Err(e) => {
-                        println!("Failed to flush future: {:?}", e);
+                        println!("Failed to flush future: {e:?}");
                         previous_frame_end = Some(sync::now(app.device.clone()).boxed());
                     }
                 }
@@ -425,14 +658,17 @@ pub fn main() {
 
 fn get_command_buffers(
     app: &App,
-    pipeline: &Arc<GraphicsPipeline>,
+    pipeline_write: &Arc<GraphicsPipeline>,
+    pipeline_read: &Arc<GraphicsPipeline>,
     framebuffers: &[Arc<Framebuffer>],
     scene_objects: &Vec<SceneObject>,
     view_projection_set: &Arc<PersistentDescriptorSet>,
+    postprocessing_sets: &[Arc<PersistentDescriptorSet>],
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
         .iter()
-        .map(|framebuffer| {
+        .enumerate()
+        .map(|(i, framebuffer)| {
             let mut builder = AutoCommandBufferBuilder::primary(
                 app.allocator_command_buffer.as_ref(),
                 app.queue_family_index,
@@ -445,14 +681,17 @@ fn get_command_buffers(
                     RenderPassBeginInfo {
                         clear_values: vec![
                             Some([0.1, 0.1, 0.1, 1.0].into()),
-                            Some(ClearValue::DepthStencil((1.0, 0))),
+                            Some([0.1, 0.1, 0.1, 1.0].into()),
+                            Some(ClearValue::DepthStencil((1.0, 1))),
                         ],
                         ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
                     },
                     SubpassContents::Inline,
-                ).unwrap()
-                .bind_pipeline_graphics(pipeline.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline.layout().clone(), 0, vec![view_projection_set.clone()]);
+                ).unwrap();
+
+            // Subpass 1
+            builder.bind_pipeline_graphics(pipeline_write.clone())
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_write.layout().clone(), 0, vec![view_projection_set.clone()]);
             for scene_object in scene_objects {
                 builder
                     .bind_vertex_buffers(0, scene_object.vertex_buffer.clone())
@@ -460,10 +699,52 @@ fn get_command_buffers(
                     .draw_indexed(scene_object.index_buffer.len() as u32, 1, 0, 0, 0).unwrap();
             }
 
-            builder.end_render_pass()
+            // Subpass 2
+            builder
+                .next_subpass(SubpassContents::Inline).unwrap()
+                .bind_pipeline_graphics(pipeline_read.clone())
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_read.layout().clone(), 0, vec![postprocessing_sets[i].clone()])
+                .draw(3, 1, 0, 0).unwrap();
+
+            builder
+                .end_render_pass()
                 .unwrap();
 
             Arc::new(builder.build().unwrap())
         })
         .collect()
+}
+
+fn create_ui(gui: &mut Gui, example: &mut Example) {
+    let ctx = gui.context();
+    egui::Area::new("controls").movable(false).show(&ctx, |ui| {
+        if ui.add(egui::widgets::Button::new(ui_text("Switch Attachment", Color32::GOLD))).clicked() {
+            example.current_attachment = if example.current_attachment == AttachmentChoice::BrightnessContrast {
+                AttachmentChoice::DepthBuffer
+            } else {
+                AttachmentChoice::BrightnessContrast
+            };
+        }
+
+        match example.current_attachment {
+            AttachmentChoice::BrightnessContrast => {
+                ui.add(egui::widgets::Label::new(ui_text("Contrast and Brightness", Color32::WHITE)));
+                ui.add(egui::widgets::Label::new(ui_text("brightness", Color32::WHITE)));
+                ui.add(egui::Slider::new(&mut example.brightness, 0.0..=2.0));
+                ui.add(egui::widgets::Label::new(ui_text("contrast", Color32::WHITE)));
+                ui.add(egui::Slider::new(&mut example.contrast, 0.0..=4.0));
+            }
+            AttachmentChoice::DepthBuffer => {
+                ui.add(egui::widgets::Label::new(ui_text("Depth", Color32::GREEN)));
+                ui.add(egui::widgets::Label::new(ui_text("near", Color32::GREEN)));
+                ui.add(egui::Slider::new(&mut example.range.x, 0.0..=1.0));
+                ui.add(egui::widgets::Label::new(ui_text("far", Color32::GREEN)));
+                ui.add(egui::Slider::new(&mut example.range.y, 0.0..=1.0));
+            }
+        }
+    });
+}
+
+fn ui_text(str: &str, color: Color32) -> WidgetText {
+    WidgetText::from(str).color(color)
 }

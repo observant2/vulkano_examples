@@ -133,7 +133,7 @@ struct Example {
 
 impl Example {
     fn new() -> Self {
-        let model = Model::load("./data/models/sphere.gltf");
+        let model = Model::load("./data/models/sphere.gltf", false);
 
         let mut ex = Example { spheres: Default::default(), model };
 
