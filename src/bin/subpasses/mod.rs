@@ -33,9 +33,13 @@ use winit::event::{Event, WindowEvent};
 use winit::event_loop::ControlFlow;
 use winit::window::Window;
 
-use vulkano_examples::App;
+use vulkano_examples::{App, gltf_loader};
 use vulkano_examples::camera::{Camera, CameraType};
-use vulkano_examples::gltf_loader::Model;
+use vulkano_examples::gltf_loader::Scene;
+
+use crate::shaders::{fs_read, fs_write, vs_read, vs_write};
+
+mod shaders;
 
 #[derive(PartialEq)]
 enum AttachmentChoice {
@@ -49,17 +53,10 @@ struct Example {
     range: Vec2,
     current_attachment: AttachmentChoice,
     postprocessing_buffer: Arc<CpuAccessibleBuffer<UBO>>,
+    vertex_buffer: Arc<CpuAccessibleBuffer<[gltf_loader::Vertex]>>,
+    index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
+    scene: Scene,
 }
-
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-    normal: [f32; 3],
-}
-
-vulkano::impl_vertex!(Vertex, position, color, normal);
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
@@ -76,137 +73,7 @@ struct UBO {
     attachment_index: i32,
 }
 
-struct SceneObject {
-    vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
-    index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
-}
-
-mod vs_write {
-    vulkano_shaders::shader! {
-            ty: "vertex",
-            src: "
-#version 450
-
-layout (location = 0) in vec3 position;
-layout (location = 1) in vec3 color;
-layout (location = 2) in vec3 normal;
-
-layout (set = 0, binding = 0) uniform ViewProjection
-{
-	mat4 view;
-	mat4 projection;
-} ubo;
-
-layout (location = 0) out vec3 outColor;
-layout (location = 1) out vec3 outNormal;
-layout (location = 2) out vec3 outViewVec;
-layout (location = 3) out vec3 outLightVec;
-
-void main()
-{
-	gl_Position =  ubo.projection * ubo.view * vec4(position, 1.0);
-	outColor = color;
-    outNormal = normal;
-	outLightVec = vec3(0.0f, 5.0f, 15.0f) - position;
-	outViewVec = -position.xyz;
-}
-"
-    }
-}
-
-mod fs_write {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        src: "
-#version 450
-
-layout (location = 0) in vec3 inColor;
-layout (location = 1) in vec3 inNormal;
-layout (location = 2) in vec3 inViewVec;
-layout (location = 3) in vec3 inLightVec;
-
-layout (location = 0) out vec4 outColor;
-
-void main()
-{
-	// Toon shading color attachment output
-	float intensity = dot(normalize(inNormal), normalize(inLightVec));
-	float shade = 1.0;
-	shade = intensity < 0.5 ? 0.75 : shade;
-	shade = intensity < 0.35 ? 0.6 : shade;
-	shade = intensity < 0.25 ? 0.5 : shade;
-	shade = intensity < 0.1 ? 0.25 : shade;
-
-	outColor.rgb = inColor * 3.0 * shade;
-
-	// Depth attachment does not need to be explicitly written
-}
-"
-    }
-}
-
-mod vs_read {
-    vulkano_shaders::shader! {
-            ty: "vertex",
-            src: "
-#version 450
-
-out gl_PerVertex {
-	vec4 gl_Position;
-};
-
-void main()
-{
-    // TODO: explain this black magic!
-	gl_Position = vec4(vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2) * 2.0f - 1.0f, 0.0f, 1.0f);
-}
-"
-    }
-}
-
-mod fs_read {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        src: "
-#version 450
-
-layout (input_attachment_index = 0, binding = 0) uniform subpassInput inputColor;
-layout (input_attachment_index = 1, binding = 1) uniform subpassInput inputDepth;
-
-layout (binding = 2) uniform UBO {
-	vec2 brightnessContrast;
-	vec2 range;
-	int attachmentIndex;
-} ubo;
-
-layout (location = 0) out vec4 outColor;
-
-vec3 brightnessContrast(vec3 color, float brightness, float contrast) {
-	return (color - 0.5) * contrast + 0.5 + brightness;
-}
-
-void main()
-{
-	// Apply brightness and contrast filer to color input
-	if (ubo.attachmentIndex == 0) {
-		// Read color from previous color input attachment
-		vec3 color = subpassLoad(inputColor).rgb;
-		outColor.rgb = brightnessContrast(color, ubo.brightnessContrast[0], ubo.brightnessContrast[1]);
-	}
-
-	// Visualize depth input range
-	if (ubo.attachmentIndex == 1) {
-		// Read depth from previous depth input attachment
-		float depth = subpassLoad(inputDepth).r;
-		outColor.rgb = vec3((depth - ubo.range[0]) /
-		                (ubo.range[1] - ubo.range[0]));
-	}
-}
-"
-    }
-}
-
-const DEPTH_FORMAT: Format = Format::D24_UNORM_S8_UINT;
+const DEPTH_FORMAT: Format = Format::D32_SFLOAT;
 
 fn get_framebuffers(memory_allocator: &Arc<StandardMemoryAllocator>, images: &[Arc<SwapchainImage>], render_pass: &Arc<RenderPass>) -> Vec<Arc<Framebuffer>> {
     images
@@ -251,9 +118,9 @@ fn get_pipeline_write(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
-        .input_assembly_state(InputAssemblyState::new())
+        .input_assembly_state(InputAssemblyState::new().topology(PrimitiveTopology::TriangleList))
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
         .fragment_shader(fs.entry_point("main").unwrap(), ())
         .depth_stencil_state(DepthStencilState::simple_depth_test())
@@ -269,7 +136,7 @@ fn get_pipeline_read(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -302,7 +169,7 @@ fn get_pipeline_read(
 }
 
 pub fn main() {
-    let (mut app, event_loop) = App::new("inputattachments");
+    let (mut app, event_loop) = App::new("subpasses");
 
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(app.device.clone()));
 
@@ -349,42 +216,22 @@ pub fn main() {
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
 
-    let meshes_from_file = Model::load("./data/models/treasure_smooth.gltf", true).meshes;
+    let scene = Scene::load("./data/models/samplebuilding.gltf", true);
 
-    let mut scene_objects = vec![];
+    let vertex_buffer = CpuAccessibleBuffer::from_iter(
+        memory_allocator.as_ref(),
+        BufferUsage::VERTEX_BUFFER,
+        false,
+        scene.vertices.clone(),
+    )
+        .expect("failed to create buffer");
 
-    for mesh in meshes_from_file {
-        for primitive in mesh.primitives {
-            let vertices: Vec<Vertex> = primitive.vertices.iter()
-                .zip(primitive.normals.iter())
-                .zip(primitive.colors.iter())
-                .map(|((v, n), c)| Vertex {
-                    position: *v,
-                    normal: *n,
-                    color: (&c[..3]).try_into().unwrap(),
-                }).collect();
-
-            let vertex_buffer = CpuAccessibleBuffer::from_iter(
-                memory_allocator.as_ref(),
-                BufferUsage::VERTEX_BUFFER,
-                false,
-                vertices,
-            )
-                .expect("failed to create buffer");
-
-            let index_buffer = CpuAccessibleBuffer::from_iter(
-                memory_allocator.as_ref(),
-                BufferUsage::INDEX_BUFFER,
-                false,
-                primitive.indices,
-            ).expect("failed to create index buffer");
-
-            scene_objects.push(SceneObject {
-                vertex_buffer,
-                index_buffer,
-            })
-        }
-    }
+    let index_buffer = CpuAccessibleBuffer::from_iter(
+        memory_allocator.as_ref(),
+        BufferUsage::INDEX_BUFFER,
+        false,
+        scene.indices.clone(),
+    ).expect("failed to create index buffer");
 
     // Create pipeline write
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
@@ -415,10 +262,9 @@ pub fn main() {
     ).unwrap();
 
     let layout = pipeline_write.layout().set_layouts().get(0).unwrap();
-    let descriptor_allocator = StandardDescriptorSetAllocator::new(app.device.clone());
 
     let view_projection_set = PersistentDescriptorSet::new(
-        &descriptor_allocator,
+        &app.allocator_descriptor_set,
         layout.clone(),
         [
             WriteDescriptorSet::buffer(0, view_projection_buffer.clone()),
@@ -440,6 +286,9 @@ pub fn main() {
                 attachment_index: 0,
             },
         ).unwrap(),
+        vertex_buffer,
+        index_buffer,
+        scene,
     };
 
     // Create pipeline read
@@ -452,16 +301,8 @@ pub fn main() {
     );
 
     let layout_read = pipeline_read.layout().set_layouts().get(0).unwrap();
-    let postprocessing_sets: Vec<_> = framebuffers.iter().map(|f: &Arc<Framebuffer>| {
-        PersistentDescriptorSet::new(
-            &descriptor_allocator,
-            layout_read.clone(),
-            [
-                WriteDescriptorSet::image_view(0, f.attachments()[1].clone()), // color
-                WriteDescriptorSet::image_view(1, f.attachments()[2].clone()), // depth
-                WriteDescriptorSet::buffer(2, example.postprocessing_buffer.clone()),
-            ]).unwrap()
-    }).collect();
+    // TODO: extract into function
+    let postprocessing_sets = create_post_processing_sets(&framebuffers, &layout_read, &app.allocator_descriptor_set, &example);
 
 
     let mut recreate_swapchain = true;
@@ -484,7 +325,7 @@ pub fn main() {
         )
     };
 
-    let mut command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &scene_objects, &view_projection_set, &postprocessing_sets);
+    let mut command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &example, &view_projection_set, &postprocessing_sets);
 
     event_loop.run(move |event, _, control_flow| {
         if let Event::WindowEvent {
@@ -541,6 +382,7 @@ pub fn main() {
                 }
 
                 if recreate_swapchain {
+                    // TODO: Window resizing leads to memory leak!
                     let (new_swapchain, new_images) =
                         match app.swapchain.recreate(SwapchainCreateInfo {
                             image_extent: window.inner_size().into(),
@@ -578,18 +420,9 @@ pub fn main() {
                     );
 
                     let layout_read = pipeline_read.layout().set_layouts().get(0).unwrap();
-                    let postprocessing_sets: Vec<_> = framebuffers.iter().map(|f: &Arc<Framebuffer>| {
-                        PersistentDescriptorSet::new(
-                            &descriptor_allocator,
-                            layout_read.clone(),
-                            [
-                                WriteDescriptorSet::image_view(0, f.attachments()[1].clone()), // color
-                                WriteDescriptorSet::image_view(1, f.attachments()[2].clone()), // depth
-                                WriteDescriptorSet::buffer(2, example.postprocessing_buffer.clone()),
-                            ]).unwrap()
-                    }).collect();
+                    let postprocessing_sets = create_post_processing_sets(&framebuffers, &layout_read, &app.allocator_descriptor_set, &example);
 
-                    command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &scene_objects, &view_projection_set, &postprocessing_sets);
+                    command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &example, &view_projection_set, &postprocessing_sets);
 
                     recreate_swapchain = false;
                 }
@@ -656,12 +489,28 @@ pub fn main() {
     });
 }
 
+fn create_post_processing_sets(framebuffers: &Vec<Arc<Framebuffer>>, layout_read: &Arc<DescriptorSetLayout>, descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>, example: &Example) ->
+Vec<Arc<PersistentDescriptorSet>> {
+    // unfortunately we need a separate descriptor set for every framebuffer, because the
+    // resulting image can be different for each renderpass and each framebuffer.
+    framebuffers.iter().map(|f: &Arc<Framebuffer>| {
+        PersistentDescriptorSet::new(
+            descriptor_set_allocator,
+            layout_read.clone(),
+            [
+                WriteDescriptorSet::image_view(0, f.attachments()[1].clone()), // color
+                WriteDescriptorSet::image_view(1, f.attachments()[2].clone()), // depth
+                WriteDescriptorSet::buffer(2, example.postprocessing_buffer.clone()),
+            ]).unwrap()
+    }).collect()
+}
+
 fn get_command_buffers(
     app: &App,
     pipeline_write: &Arc<GraphicsPipeline>,
     pipeline_read: &Arc<GraphicsPipeline>,
     framebuffers: &[Arc<Framebuffer>],
-    scene_objects: &Vec<SceneObject>,
+    example: &Example,
     view_projection_set: &Arc<PersistentDescriptorSet>,
     postprocessing_sets: &[Arc<PersistentDescriptorSet>],
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
@@ -682,7 +531,7 @@ fn get_command_buffers(
                         clear_values: vec![
                             Some([0.1, 0.1, 0.1, 1.0].into()),
                             Some([0.1, 0.1, 0.1, 1.0].into()),
-                            Some(ClearValue::DepthStencil((1.0, 1))),
+                            Some(ClearValue::Depth(1.0)),
                         ],
                         ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
                     },
@@ -691,13 +540,10 @@ fn get_command_buffers(
 
             // Subpass 1
             builder.bind_pipeline_graphics(pipeline_write.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_write.layout().clone(), 0, vec![view_projection_set.clone()]);
-            for scene_object in scene_objects {
-                builder
-                    .bind_vertex_buffers(0, scene_object.vertex_buffer.clone())
-                    .bind_index_buffer(scene_object.index_buffer.clone())
-                    .draw_indexed(scene_object.index_buffer.len() as u32, 1, 0, 0, 0).unwrap();
-            }
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_write.layout().clone(), 0, vec![view_projection_set.clone()])
+                .bind_vertex_buffers(0, example.vertex_buffer.clone())
+                .bind_index_buffer(example.index_buffer.clone());
+            example.scene.draw(&mut builder);
 
             // Subpass 2
             builder
@@ -716,33 +562,33 @@ fn get_command_buffers(
 }
 
 fn create_ui(gui: &mut Gui, example: &mut Example) {
-    let ctx = gui.context();
-    egui::Area::new("controls").movable(false).show(&ctx, |ui| {
-        if ui.add(egui::widgets::Button::new(ui_text("Switch Attachment", Color32::GOLD))).clicked() {
-            example.current_attachment = if example.current_attachment == AttachmentChoice::BrightnessContrast {
-                AttachmentChoice::DepthBuffer
-            } else {
-                AttachmentChoice::BrightnessContrast
-            };
-        }
-
-        match example.current_attachment {
-            AttachmentChoice::BrightnessContrast => {
-                ui.add(egui::widgets::Label::new(ui_text("Contrast and Brightness", Color32::WHITE)));
-                ui.add(egui::widgets::Label::new(ui_text("brightness", Color32::WHITE)));
-                ui.add(egui::Slider::new(&mut example.brightness, 0.0..=2.0));
-                ui.add(egui::widgets::Label::new(ui_text("contrast", Color32::WHITE)));
-                ui.add(egui::Slider::new(&mut example.contrast, 0.0..=4.0));
-            }
-            AttachmentChoice::DepthBuffer => {
-                ui.add(egui::widgets::Label::new(ui_text("Depth", Color32::GREEN)));
-                ui.add(egui::widgets::Label::new(ui_text("near", Color32::GREEN)));
-                ui.add(egui::Slider::new(&mut example.range.x, 0.0..=1.0));
-                ui.add(egui::widgets::Label::new(ui_text("far", Color32::GREEN)));
-                ui.add(egui::Slider::new(&mut example.range.y, 0.0..=1.0));
-            }
-        }
-    });
+    // let ctx = gui.context();
+    // egui::Area::new("controls").movable(false).show(&ctx, |ui| {
+    //     if ui.add(egui::widgets::Button::new(ui_text("Switch Attachment", Color32::GOLD))).clicked() {
+    //         example.current_attachment = if example.current_attachment == AttachmentChoice::BrightnessContrast {
+    //             AttachmentChoice::DepthBuffer
+    //         } else {
+    //             AttachmentChoice::BrightnessContrast
+    //         };
+    //     }
+    //
+    //     match example.current_attachment {
+    //         AttachmentChoice::BrightnessContrast => {
+    //             ui.add(egui::widgets::Label::new(ui_text("Contrast and Brightness", Color32::WHITE)));
+    //             ui.add(egui::widgets::Label::new(ui_text("brightness", Color32::WHITE)));
+    //             ui.add(egui::Slider::new(&mut example.brightness, 0.0..=2.0));
+    //             ui.add(egui::widgets::Label::new(ui_text("contrast", Color32::WHITE)));
+    //             ui.add(egui::Slider::new(&mut example.contrast, 0.0..=4.0));
+    //         }
+    //         AttachmentChoice::DepthBuffer => {
+    //             ui.add(egui::widgets::Label::new(ui_text("Depth", Color32::GREEN)));
+    //             ui.add(egui::widgets::Label::new(ui_text("near", Color32::GREEN)));
+    //             ui.add(egui::Slider::new(&mut example.range.x, 0.0..=1.0));
+    //             ui.add(egui::widgets::Label::new(ui_text("far", Color32::GREEN)));
+    //             ui.add(egui::Slider::new(&mut example.range.y, 0.0..=1.0));
+    //         }
+    //     }
+    // });
 }
 
 fn ui_text(str: &str, color: Color32) -> WidgetText {

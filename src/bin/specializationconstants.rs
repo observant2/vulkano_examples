@@ -36,7 +36,7 @@ use winit::window::Window;
 
 use vulkano_examples::App;
 use vulkano_examples::camera::Camera;
-use vulkano_examples::gltf_loader::{Mesh, Model};
+use vulkano_examples::gltf_loader::{Mesh, Scene};
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
@@ -362,7 +362,7 @@ pub fn main() {
         .unwrap()
         .then_signal_fence_and_flush();
 
-    let meshes_from_file = Model::load("./data/models/color_teapot_spheres.gltf", true).meshes;
+    let meshes_from_file = Scene::load("./data/models/color_teapot_spheres.gltf", true).meshes;
 
     let mut scene_objects = vec![];
 

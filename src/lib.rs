@@ -7,6 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use vulkano::command_buffer::allocator::{
     StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
 };
+use vulkano::descriptor_set::allocator::{StandardDescriptorSetAllocator};
 use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags};
 use vulkano::format::Format;
@@ -41,6 +42,7 @@ pub struct App {
     pub swapchain: Arc<Swapchain>,
     pub swapchain_images: Vec<Arc<SwapchainImage>>,
     pub allocator_command_buffer: Arc<StandardCommandBufferAllocator>,
+    pub allocator_descriptor_set: Arc<StandardDescriptorSetAllocator>,
 }
 
 impl App {
@@ -137,7 +139,7 @@ impl App {
                 image_extent: window.inner_size().into(),
                 image_usage: ImageUsage::COLOR_ATTACHMENT ,
                 composite_alpha,
-                present_mode: PresentMode::Fifo,
+                present_mode: PresentMode::FifoRelaxed,
                 ..Default::default()
             },
         )
@@ -148,8 +150,11 @@ impl App {
             StandardCommandBufferAllocatorCreateInfo::default(),
         ));
 
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(device.clone()));
+
         (App {
             allocator_command_buffer: command_buffer_allocator,
+            allocator_descriptor_set: descriptor_set_allocator,
             device,
             instance,
             surface,

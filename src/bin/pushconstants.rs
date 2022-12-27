@@ -29,7 +29,7 @@ use winit::window::Window;
 
 use vulkano_examples::App;
 use vulkano_examples::camera::Camera;
-use vulkano_examples::gltf_loader::Model;
+use vulkano_examples::gltf_loader::Scene;
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
@@ -128,12 +128,12 @@ fn get_pipeline(
 
 struct Example {
     spheres: [SpherePushConstantData; 16],
-    model: Model,
+    model: Scene,
 }
 
 impl Example {
     fn new() -> Self {
-        let model = Model::load("./data/models/sphere.gltf", false);
+        let model = Scene::load("./data/models/sphere.gltf", false);
 
         let mut ex = Example { spheres: Default::default(), model };
 

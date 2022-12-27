@@ -36,7 +36,7 @@ use winit::window::Window;
 
 use vulkano_examples::App;
 use vulkano_examples::camera::Camera;
-use vulkano_examples::gltf_loader::Model;
+use vulkano_examples::gltf_loader::Scene;
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
@@ -63,13 +63,13 @@ struct Matrices {
 }
 
 struct Example {
-    model: Model,
+    model: Scene,
     cubes: Vec<Cube>,
 }
 
 impl Example {
     fn new() -> Self {
-        let model = Model::load("./data/models/cube.gltf", false);
+        let model = Scene::load("./data/models/cube.gltf", false);
 
         let mut cubes = vec![];
 

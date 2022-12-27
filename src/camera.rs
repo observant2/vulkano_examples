@@ -1,7 +1,7 @@
-use nalgebra_glm::{cos, Mat4, rotate_x, rotate_y, rotate_z, rotation, translate, Vec3, vec3, vec3_to_vec4, vec4, vec4_to_vec3};
-use winit::event::{ButtonId, ElementState, Event, MouseButton, MouseScrollDelta, VirtualKeyCode};
-use winit::event::DeviceEvent::{Button, Key, MouseMotion};
-use winit::event::WindowEvent::{CursorMoved, MouseInput, MouseWheel};
+use nalgebra_glm::{Mat4, rotate_x, rotate_y, rotate_z, translate, Vec3, vec3};
+use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, VirtualKeyCode};
+use winit::event::DeviceEvent::{Key, MouseMotion};
+use winit::event::WindowEvent::{MouseInput, MouseWheel};
 
 pub struct Camera {
     view_matrix: Mat4,
@@ -154,7 +154,7 @@ impl Camera {
 
         let delta_time = delta_time / 1000.0;
 
-        let mut cam_front = vec3(
+        let cam_front = vec3(
             -self.rotation.x.to_radians().cos() * self.rotation.y.to_radians().sin(),
             self.rotation.x.to_radians().sin(),
             self.rotation.x.to_radians().cos() * self.rotation.y.to_radians().cos(),
@@ -192,7 +192,7 @@ impl Camera {
     }
 
     pub fn get_perspective_matrix(&self) -> Mat4 {
-        let mut m = self.perspective_matrix;
+        let m = self.perspective_matrix;
 
         // correct for y pointing downwards
         // m[(1, 1)] *= -1.0;
