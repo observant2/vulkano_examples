@@ -1,14 +1,14 @@
-use std::borrow::{Borrow, BorrowMut};
-use std::cell::RefCell;
+
+
 use std::ops::Mul;
-use std::rc::{Rc, Weak};
+
 use bytemuck::{Pod, Zeroable};
 use gltf::accessor::Dimensions;
 use gltf::json::accessor::ComponentType;
 use gltf::{Node, Semantic};
 use gltf::buffer::Data;
-use nalgebra_glm::{Mat4, mat4_to_mat3, vec3, Vec3, vec4, Vec4};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer, PrimaryCommandBuffer};
+use nalgebra_glm::{Mat4, mat4_to_mat3, vec3, vec4};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer};
 
 pub struct Scene {
     // root nodes
@@ -196,9 +196,7 @@ impl Scene {
     pub fn load(path: &str, flip_y: bool) -> Scene {
         let (model, buffers, _) = gltf::import(path).unwrap_or_else(|_| panic!("couldn't load model at: {}", path));
 
-        let mut meshes: Vec<Mesh> = vec![];
-
-        let scene = &model.scenes().into_iter().collect::<Vec<_>>()[0];
+        let scene = &model.scenes().collect::<Vec<_>>()[0];
 
         let mut model = Scene {
             indices: vec![],
@@ -226,84 +224,6 @@ impl Scene {
         }
 
         model
-
-        //
-        //     for mesh in model.meshes() {
-        //         primitives.push(ModelPrimitive {
-        //             tex_coords,
-        //             indices,
-        //             vertices,
-        //             normals,
-        //             colors,
-        //         });
-        //     }
-        //
-        //     meshes.push(Mesh {
-        //         primitives,
-        //     })
-        // }
-        //
-        // for n in model.nodes() {
-        // if let Some(mesh) = n.mesh() {
-        // // node applies to mesh
-        // for p in & mut meshes[mesh.index()].primitives {
-        // for v in & mut p.vertices {
-        // let res: Vec4 = Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0);
-        // // bruuuh
-        // let arr = res.data.0[0];
-        // * v = [arr[0], arr[1], arr[2]];
-        // }
-        //
-        // let normal_matrix = mat4_to_mat3( & Mat4::from(n.transform().matrix())).try_inverse().unwrap().transpose();
-        // for normal in & mut p.normals {
-        // let res: Vec3 = (normal_matrix * vec3(normal[0], normal[1], normal[2])).normalize();
-        // // bruuuh
-        // let arr = res.data.0[0];
-        // * normal = [arr[0], arr[1], arr[2]];
-        // }
-        // }
-        // }
-        // }
-        //
-        // for n in model.nodes() {
-        // for c in n.children() {
-        // if let Some(mesh) = c.mesh() {
-        // for m in & mut meshes[mesh.index()].primitives {
-        // for v in & mut m.vertices {
-        // let res: Vec4 = Mat4::from(n.transform().matrix()) * vec4(v[0], v[1], v[2], 1.0);
-        // // bruuuh
-        // let arr = res.data.0[0];
-        // * v = [arr[0], arr[1], arr[2]];
-        // }
-        //
-        // let normal_matrix = mat4_to_mat3( & Mat4::from(n.transform().matrix())).try_inverse().unwrap().transpose();
-        // for normal in & mut m.normals {
-        // let res: Vec3 = (normal_matrix * vec3(normal[0], normal[1], normal[2])).normalize();
-        // // bruuuh
-        // let arr = res.data.0[0];
-        // * normal = [arr[0], arr[1], arr[2]];
-        // }
-        // }
-        // }
-        // }
-        // }
-        //
-        // if flip_y {
-        // for m in & mut meshes {
-        // for p in & mut m.primitives {
-        // for v in & mut p.vertices {
-        // v[1] *= - 1.0;
-        // }
-        // for n in & mut p.normals {
-        // n[1] *= - 1.0;
-        // }
-        // }
-        // }
-        // }
-        //
-        // Model {
-        // meshes,
-// }
     }
 
     fn draw_node(&self, node: &ModelNode, builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>) {

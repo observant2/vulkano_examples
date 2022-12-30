@@ -6,7 +6,7 @@ pub mod vs_write {
 #version 450
 
 layout (location = 0) in vec3 position;
-layout (location = 1) in vec3 color;
+layout (location = 1) in vec4 color;
 layout (location = 2) in vec3 normal;
 
 layout (set = 0, binding = 0) uniform ViewProjection
@@ -23,7 +23,7 @@ layout (location = 3) out vec3 outLightVec;
 void main()
 {
 	gl_Position =  ubo.projection * ubo.view * vec4(position, 1.0);
-	outColor = color;
+	outColor = color.rgb;
     outNormal = normal;
 	outLightVec = vec3(0.0f, 5.0f, 15.0f) - position;
 	outViewVec = -position.xyz;
@@ -75,7 +75,7 @@ out gl_PerVertex {
 
 void main()
 {
-    // TODO: explain this black magic!
+    // Creates a triangle with a right angle at (0, 0) that fills the screen
 	gl_Position = vec4(vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2) * 2.0f - 1.0f, 0.0f, 1.0f);
 }
 "

@@ -33,7 +33,7 @@ use winit::event::{Event, WindowEvent};
 use winit::event_loop::ControlFlow;
 use winit::window::Window;
 
-use vulkano_examples::App;
+use vulkano_examples::{App, gltf_loader};
 use vulkano_examples::camera::{Camera, CameraType};
 use vulkano_examples::gltf_loader::Scene;
 
@@ -53,17 +53,10 @@ struct Example {
     range: Vec2,
     current_attachment: AttachmentChoice,
     postprocessing_buffer: Arc<CpuAccessibleBuffer<UBO>>,
+    vertex_buffer: Arc<CpuAccessibleBuffer<[gltf_loader::Vertex]>>,
+    index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
+    scene: Scene
 }
-
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-    normal: [f32; 3],
-}
-
-vulkano::impl_vertex!(Vertex, position, color, normal);
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
@@ -78,11 +71,6 @@ struct UBO {
     brightness_contrast: Vec2,
     range: Vec2,
     attachment_index: i32,
-}
-
-struct SceneObject {
-    vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
-    index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
 }
 
 const DEPTH_FORMAT: Format = Format::D32_SFLOAT;
@@ -130,7 +118,7 @@ fn get_pipeline_write(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -148,7 +136,7 @@ fn get_pipeline_read(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -228,42 +216,23 @@ pub fn main() {
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
 
-    let meshes_from_file = Scene::load("./data/models/treasure_smooth.gltf", true).meshes;
+    let scene = Scene::load("./data/models/treasure_smooth.gltf", true);
 
-    let mut scene_objects = vec![];
+    let vertex_buffer = CpuAccessibleBuffer::from_iter(
+        memory_allocator.as_ref(),
+        BufferUsage::VERTEX_BUFFER,
+        false,
+        scene.vertices.clone(),
+    )
+        .expect("failed to create buffer");
 
-    for mesh in meshes_from_file {
-        for primitive in mesh.primitives {
-            let vertices: Vec<Vertex> = primitive.vertices.iter()
-                .zip(primitive.normals.iter())
-                .zip(primitive.colors.iter())
-                .map(|((v, n), c)| Vertex {
-                    position: *v,
-                    normal: *n,
-                    color: (&c[..3]).try_into().unwrap(),
-                }).collect();
+    let index_buffer = CpuAccessibleBuffer::from_iter(
+        memory_allocator.as_ref(),
+        BufferUsage::INDEX_BUFFER,
+        false,
+        scene.indices.clone(),
+    ).expect("failed to create index buffer");
 
-            let vertex_buffer = CpuAccessibleBuffer::from_iter(
-                memory_allocator.as_ref(),
-                BufferUsage::VERTEX_BUFFER,
-                false,
-                vertices,
-            )
-                .expect("failed to create buffer");
-
-            let index_buffer = CpuAccessibleBuffer::from_iter(
-                memory_allocator.as_ref(),
-                BufferUsage::INDEX_BUFFER,
-                false,
-                primitive.indices,
-            ).expect("failed to create index buffer");
-
-            scene_objects.push(SceneObject {
-                vertex_buffer,
-                index_buffer,
-            })
-        }
-    }
 
     // Create pipeline write
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
@@ -318,6 +287,9 @@ pub fn main() {
                 attachment_index: 0,
             },
         ).unwrap(),
+        vertex_buffer,
+        index_buffer,
+        scene,
     };
 
     // Create pipeline read
@@ -330,9 +302,7 @@ pub fn main() {
     );
 
     let layout_read = pipeline_read.layout().set_layouts().get(0).unwrap();
-    // TODO: extract into function
     let postprocessing_sets = create_post_processing_sets(&framebuffers, &layout_read, &app.allocator_descriptor_set, &example);
-
 
     let mut recreate_swapchain = true;
 
@@ -343,6 +313,7 @@ pub fn main() {
     let mut camera = Camera::new(vec3(1.65, 1.75, -6.15), aspect_ratio, f32::to_radians(60.0), 0.1, 256.0);
     camera.set_rotation(vec3(-12.75, 380.0, 0.0));
     camera.camera_type = CameraType::FirstPerson;
+    camera.update_view_matrix();
 
     let mut gui = {
         Gui::new(
@@ -354,7 +325,7 @@ pub fn main() {
         )
     };
 
-    let mut command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &scene_objects, &view_projection_set, &postprocessing_sets);
+    let mut command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &example, &view_projection_set, &postprocessing_sets);
 
     event_loop.run(move |event, _, control_flow| {
         if let Event::WindowEvent {
@@ -451,7 +422,7 @@ pub fn main() {
                     let layout_read = pipeline_read.layout().set_layouts().get(0).unwrap();
                     let postprocessing_sets = create_post_processing_sets(&framebuffers, &layout_read, &app.allocator_descriptor_set, &example);
 
-                    command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &scene_objects, &view_projection_set, &postprocessing_sets);
+                    command_buffers = get_command_buffers(&app, &pipeline_write, &pipeline_read, &framebuffers, &example, &view_projection_set, &postprocessing_sets);
 
                     recreate_swapchain = false;
                 }
@@ -539,7 +510,7 @@ fn get_command_buffers(
     pipeline_write: &Arc<GraphicsPipeline>,
     pipeline_read: &Arc<GraphicsPipeline>,
     framebuffers: &[Arc<Framebuffer>],
-    scene_objects: &Vec<SceneObject>,
+    example: &Example,
     view_projection_set: &Arc<PersistentDescriptorSet>,
     postprocessing_sets: &[Arc<PersistentDescriptorSet>],
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
@@ -569,13 +540,10 @@ fn get_command_buffers(
 
             // Subpass 1
             builder.bind_pipeline_graphics(pipeline_write.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_write.layout().clone(), 0, vec![view_projection_set.clone()]);
-            for scene_object in scene_objects {
-                builder
-                    .bind_vertex_buffers(0, scene_object.vertex_buffer.clone())
-                    .bind_index_buffer(scene_object.index_buffer.clone())
-                    .draw_indexed(scene_object.index_buffer.len() as u32, 1, 0, 0, 0).unwrap();
-            }
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_write.layout().clone(), 0, vec![view_projection_set.clone()])
+                .bind_vertex_buffers(0, example.vertex_buffer.clone())
+                .bind_index_buffer(example.index_buffer.clone());
+            example.scene.draw(&mut builder);
 
             // Subpass 2
             builder

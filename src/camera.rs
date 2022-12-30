@@ -7,7 +7,7 @@ pub struct Camera {
     view_matrix: Mat4,
     perspective_matrix: Mat4,
     keys_pressed: KeysPressed,
-    movement_speed: f32,
+    pub movement_speed: f32,
     position: Vec3,
     rotation: Vec3,
     pub mouse_pressed: (MouseButton, bool),

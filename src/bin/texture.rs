@@ -229,7 +229,7 @@ pub fn main() {
 
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
-    let mut example = Example::new();
+    let example = Example::new();
 
     let vertex_buffer = CpuAccessibleBuffer::from_iter(
         memory_allocator.as_ref(),
