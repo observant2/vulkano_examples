@@ -79,7 +79,7 @@ void main()
 	outAlbedo.rgb = inColor;
 
 	// Store linearized depth in alpha component
-	outPosition.a = linearDepth(gl_FragCoord.z);
+	outAlbedo.a = linearDepth(gl_FragCoord.z);
 
 	// Write color attachments to avoid undefined behaviour (validation error)
 	outColor = vec4(0.0);

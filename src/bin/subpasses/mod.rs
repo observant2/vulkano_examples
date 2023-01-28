@@ -21,7 +21,7 @@ use vulkano::image::{AttachmentImage, ImageAccess, ImageDimensions, ImageUsage, 
 use vulkano::image::view::{ImageView};
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout, StateMode};
-use vulkano::pipeline::graphics::color_blend::ColorBlendState;
+use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, BlendOp, ColorBlendState, ColorComponents};
 use vulkano::pipeline::graphics::depth_stencil::{CompareOp, DepthBoundsState, DepthState, DepthStencilState};
 use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveTopology};
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
@@ -51,6 +51,7 @@ struct Example {
     composition_vertex_buffer: Arc<CpuAccessibleBuffer<[gltf_loader::Vertex]>>,
     composition_index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
 
+    // TODO: this ubo can be the same mvp-matrix like for the gbuffer, as model is just the identity
     transparency_ubo: Arc<CpuAccessibleBuffer<ModelViewProjection>>,
     transparency_vertex_buffer: Arc<CpuAccessibleBuffer<[gltf_loader::Vertex]>>,
     transparency_index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
@@ -232,14 +233,38 @@ fn get_pipeline_transparency(
     render_pass: Arc<RenderPass>,
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
+    let mut blend_state = ColorBlendState::default().blend_alpha();
+    for att in &mut blend_state.attachments {
+        att.blend = Some(AttachmentBlend {
+            color_op: BlendOp::Add,
+            color_source: BlendFactor::SrcAlpha,
+            color_destination: BlendFactor::OneMinusSrcAlpha,
+            alpha_op: BlendOp::Add,
+            alpha_source: BlendFactor::One,
+            alpha_destination: BlendFactor::Zero,
+        });
+        att.color_write_enable = StateMode::Fixed(true);
+        att.color_write_mask = ColorComponents::all();
+    }
+    let depth_test = DepthStencilState {
+        depth: Some(DepthState {
+            enable_dynamic: false,
+            compare_op: StateMode::Fixed(CompareOp::Less),
+            // don't write depth and discard fragments, we'll do that manually in the shader
+            write_enable: StateMode::Fixed(false),
+        }),
+        depth_bounds: Default::default(),
+        stencil: Default::default(),
+    };
+
     GraphicsPipeline::start()
         .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
         .fragment_shader(fs.entry_point("main").unwrap(), ())
-        .depth_stencil_state(DepthStencilState::simple_depth_test())
-        .color_blend_state(ColorBlendState::default().blend_alpha())
+        .depth_stencil_state(depth_test)
+        .color_blend_state(blend_state)
         .render_pass(Subpass::from(render_pass, 2).unwrap())
         .with_pipeline_layout(device.clone(), PipelineLayout::new(device.clone(), PipelineLayoutCreateInfo {
             set_layouts: vec![
@@ -443,11 +468,11 @@ pub fn main() {
             UBO::default(),
         ).unwrap(),
         composition_vertex_buffer: CpuAccessibleBuffer::from_iter(
-        memory_allocator.as_ref(),
-        BufferUsage::VERTEX_BUFFER,
-        false,
-        scene.vertices.clone(),
-    ) .expect("failed to create buffer"),
+            memory_allocator.as_ref(),
+            BufferUsage::VERTEX_BUFFER,
+            false,
+            scene.vertices.clone(),
+        ).expect("failed to create buffer"),
         composition_index_buffer: CpuAccessibleBuffer::from_iter(
             memory_allocator.as_ref(),
             BufferUsage::INDEX_BUFFER,
@@ -462,8 +487,8 @@ pub fn main() {
             BufferUsage::VERTEX_BUFFER,
             false,
             glass.vertices.clone(),
-        ) .expect("failed to create buffer"),
-        transparency_index_buffer:CpuAccessibleBuffer::from_iter(
+        ).expect("failed to create buffer"),
+        transparency_index_buffer: CpuAccessibleBuffer::from_iter(
             memory_allocator.as_ref(),
             BufferUsage::INDEX_BUFFER,
             false,
@@ -613,6 +638,14 @@ pub fn main() {
                     let layout_read = pipeline_read.layout().set_layouts().get(0).unwrap();
                     let postprocessing_sets = create_composition_sets(&framebuffers, &layout_read, &app.allocator_descriptor_set, &example);
 
+                    let pipeline_transparency = get_pipeline_transparency(
+                        app.device.clone(),
+                        vs_transparent::load(app.device.clone()).unwrap(),
+                        fs_transparent::load(app.device.clone()).unwrap(),
+                        render_pass.clone(),
+                        viewport.clone(),
+                    );
+
                     command_buffers = get_command_buffers(&app, &pipeline_gbuffer, &pipeline_read, &pipeline_transparency, &framebuffers, &example,
                                                           &view_projection_set, &postprocessing_sets, &transparency_sets);
 
@@ -711,7 +744,7 @@ Vec<Arc<PersistentDescriptorSet>> {
 fn create_transparency_sets(framebuffers: &Vec<Arc<Framebuffer>>, layout_transparency: &Arc<DescriptorSetLayout>,
                             descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>, example: &Example,
                             glass_texture: &Arc<ImmutableImage>, sampler: &Arc<Sampler>) ->
-Vec<Arc<PersistentDescriptorSet>> {
+                            Vec<Arc<PersistentDescriptorSet>> {
     framebuffers.iter().map(|f: &Arc<Framebuffer>| {
         PersistentDescriptorSet::new(
             descriptor_set_allocator,
@@ -720,7 +753,7 @@ Vec<Arc<PersistentDescriptorSet>> {
                 WriteDescriptorSet::buffer(0, example.transparency_ubo.clone()),
                 WriteDescriptorSet::image_view(1, f.attachments()[1].clone()),
                 WriteDescriptorSet::image_view_sampler(2, ImageView::new_default(glass_texture.clone()).unwrap(), sampler.clone())
-            ]
+            ],
         ).unwrap()
     }).collect()
 }
