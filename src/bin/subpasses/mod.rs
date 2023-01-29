@@ -24,6 +24,7 @@ use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineL
 use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, BlendOp, ColorBlendState, ColorComponents};
 use vulkano::pipeline::graphics::depth_stencil::{CompareOp, DepthBoundsState, DepthState, DepthStencilState};
 use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveTopology};
+use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
@@ -48,11 +49,10 @@ mod shaders;
 
 struct Example {
     composition_ubo: Arc<CpuAccessibleBuffer<UBO>>,
+
     composition_vertex_buffer: Arc<CpuAccessibleBuffer<[gltf_loader::Vertex]>>,
     composition_index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
 
-    // TODO: this ubo can be the same mvp-matrix like for the gbuffer, as model is just the identity
-    transparency_ubo: Arc<CpuAccessibleBuffer<ModelViewProjection>>,
     transparency_vertex_buffer: Arc<CpuAccessibleBuffer<[gltf_loader::Vertex]>>,
     transparency_index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
 
@@ -196,7 +196,7 @@ fn get_pipeline_composition(
         .render_pass(Subpass::from(render_pass, 1).unwrap())
         .with_pipeline_layout(device.clone(), PipelineLayout::new(device.clone(), PipelineLayoutCreateInfo {
             set_layouts: vec![
-                DescriptorSetLayout::new(device.clone(), DescriptorSetLayoutCreateInfo {
+                DescriptorSetLayout::new(device, DescriptorSetLayoutCreateInfo {
                     bindings: BTreeMap::from([
                         // position
                         (0, DescriptorSetLayoutBinding {
@@ -233,29 +233,9 @@ fn get_pipeline_transparency(
     render_pass: Arc<RenderPass>,
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
-    let mut blend_state = ColorBlendState::default().blend_alpha();
-    for att in &mut blend_state.attachments {
-        att.blend = Some(AttachmentBlend {
-            color_op: BlendOp::Add,
-            color_source: BlendFactor::SrcAlpha,
-            color_destination: BlendFactor::OneMinusSrcAlpha,
-            alpha_op: BlendOp::Add,
-            alpha_source: BlendFactor::One,
-            alpha_destination: BlendFactor::Zero,
-        });
-        att.color_write_enable = StateMode::Fixed(true);
-        att.color_write_mask = ColorComponents::all();
-    }
-    let depth_test = DepthStencilState {
-        depth: Some(DepthState {
-            enable_dynamic: false,
-            compare_op: StateMode::Fixed(CompareOp::Less),
-            // don't write depth and discard fragments, we'll do that manually in the shader
-            write_enable: StateMode::Fixed(false),
-        }),
-        depth_bounds: Default::default(),
-        stencil: Default::default(),
-    };
+    let mut sample_state = MultisampleState::new();
+    // we use this instead of the technique in the original
+    sample_state.alpha_to_coverage_enable = true;
 
     GraphicsPipeline::start()
         .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
@@ -263,12 +243,12 @@ fn get_pipeline_transparency(
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
         .fragment_shader(fs.entry_point("main").unwrap(), ())
-        .depth_stencil_state(depth_test)
-        .color_blend_state(blend_state)
+        .depth_stencil_state(DepthStencilState::simple_depth_test())
+        .multisample_state(sample_state)
         .render_pass(Subpass::from(render_pass, 2).unwrap())
         .with_pipeline_layout(device.clone(), PipelineLayout::new(device.clone(), PipelineLayoutCreateInfo {
             set_layouts: vec![
-                DescriptorSetLayout::new(device.clone(), DescriptorSetLayoutCreateInfo {
+                DescriptorSetLayout::new(device, DescriptorSetLayoutCreateInfo {
                     bindings: BTreeMap::from([
                         (0, DescriptorSetLayoutBinding {
                             stages: ShaderStages::VERTEX,
@@ -410,16 +390,6 @@ pub fn main() {
     );
 
     let transparency_layout = pipeline_transparency.layout().set_layouts().get(0).unwrap();
-    let transparency_ubo = CpuAccessibleBuffer::from_data(
-        memory_allocator.as_ref(),
-        BufferUsage::UNIFORM_BUFFER,
-        false,
-        ModelViewProjection {
-            model: identity(),
-            projection: identity(),
-            view: identity(),
-        },
-    ).unwrap();
 
     let _ = uploads
         .build()
@@ -481,7 +451,6 @@ pub fn main() {
         ).expect("failed to create index buffer"),
         composition_scene: scene,
 
-        transparency_ubo: transparency_ubo.clone(),
         transparency_vertex_buffer: CpuAccessibleBuffer::from_iter(
             memory_allocator.as_ref(),
             BufferUsage::VERTEX_BUFFER,
@@ -498,7 +467,7 @@ pub fn main() {
     };
 
     let transparency_sets =
-        create_transparency_sets(&framebuffers, &transparency_layout, &app.allocator_descriptor_set, &example, &glass_texture, &sampler);
+        create_transparency_sets(&framebuffers, &transparency_layout, &app.allocator_descriptor_set, &example, &glass_texture, &sampler, &view_projection_buffer);
 
     // Create composition pipeline
     let pipeline_composition = get_pipeline_composition(
@@ -660,14 +629,6 @@ pub fn main() {
                         view_projection.projection = camera.get_perspective_matrix();
                     }
                 }
-                {
-                    let view_projection = transparency_ubo.write();
-
-                    if let Ok(mut view_projection) = view_projection {
-                        view_projection.view = camera.get_view_matrix();
-                        view_projection.projection = camera.get_perspective_matrix();
-                    }
-                }
 
                 let (image_i, suboptimal, acquire_future) =
                     match swapchain::acquire_next_image(app.swapchain.clone(), None) {
@@ -743,14 +704,14 @@ Vec<Arc<PersistentDescriptorSet>> {
 
 fn create_transparency_sets(framebuffers: &Vec<Arc<Framebuffer>>, layout_transparency: &Arc<DescriptorSetLayout>,
                             descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>, example: &Example,
-                            glass_texture: &Arc<ImmutableImage>, sampler: &Arc<Sampler>) ->
+                            glass_texture: &Arc<ImmutableImage>, sampler: &Arc<Sampler>, model_view_projection_buffer: &Arc<CpuAccessibleBuffer<ModelViewProjection>>) ->
                             Vec<Arc<PersistentDescriptorSet>> {
     framebuffers.iter().map(|f: &Arc<Framebuffer>| {
         PersistentDescriptorSet::new(
             descriptor_set_allocator,
             layout_transparency.clone(),
             [
-                WriteDescriptorSet::buffer(0, example.transparency_ubo.clone()),
+                WriteDescriptorSet::buffer(0, model_view_projection_buffer.clone()),
                 WriteDescriptorSet::image_view(1, f.attachments()[1].clone()),
                 WriteDescriptorSet::image_view_sampler(2, ImageView::new_default(glass_texture.clone()).unwrap(), sampler.clone())
             ],
