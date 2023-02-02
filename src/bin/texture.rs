@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use ktx::KtxInfo;
 use nalgebra_glm::{identity, Mat4, vec3, Vec4};
 use vulkano::{swapchain, sync};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
+use vulkano::buffer::{Buffer, BufferAllocateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassContents};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
@@ -20,7 +20,7 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState};
-use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
+use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
@@ -38,14 +38,15 @@ use vulkano_examples::App;
 use vulkano_examples::camera::Camera;
 
 #[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-pub struct Vertex {
+#[derive(Default, Copy, Clone, Zeroable, Pod, Vertex)]
+pub struct MyVertex {
+    #[format(R32G32B32_SFLOAT)]
     pub position: [f32; 3],
+    #[format(R32G32_SFLOAT)]
     pub uv: [f32; 2],
+    #[format(R32G32B32_SFLOAT)]
     pub normal: [f32; 3],
 }
-
-vulkano::impl_vertex!(Vertex, position, uv, normal);
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
@@ -57,7 +58,7 @@ struct UBO {
 }
 
 struct Example {
-    quad_vertices: Vec<Vertex>,
+    quad_vertices: Vec<MyVertex>,
     quad_indices: Vec<u16>,
 }
 
@@ -65,14 +66,14 @@ impl Example {
     fn new() -> Self {
         Self {
             quad_vertices: vec![
-                Vertex {
+                MyVertex {
                     position: [1.0, 1.0, 0.0],
                     uv: [1.0, 1.0],
                     normal: [0.0, 0.0, 1.0],
                 },
-                Vertex { position: [-1.0, 1.0, 0.0], uv: [0.0, 1.0], normal: [0.0, 0.0, 1.0] },
-                Vertex { position: [-1.0, -1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
-                Vertex { position: [1.0, -1.0, 0.0], uv: [1.0, 0.0], normal: [0.0, 0.0, 1.0] },
+                MyVertex { position: [-1.0, 1.0, 0.0], uv: [0.0, 1.0], normal: [0.0, 0.0, 1.0] },
+                MyVertex { position: [-1.0, -1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+                MyVertex { position: [1.0, -1.0, 0.0], uv: [1.0, 0.0], normal: [0.0, 0.0, 1.0] },
             ],
             quad_indices: vec![0, 1, 2, 2, 3, 0],
         }
@@ -169,7 +170,7 @@ fn get_pipeline(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_input_state(MyVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -231,27 +232,33 @@ pub fn main() {
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
     let example = Example::new();
 
-    let vertex_buffer = CpuAccessibleBuffer::from_iter(
+    let vertex_buffer = Buffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage::VERTEX_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::VERTEX_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         example.quad_vertices,
     )
         .expect("failed to create buffer");
 
-    let index_buffer = CpuAccessibleBuffer::from_iter(
+    let index_buffer = Buffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage::INDEX_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::INDEX_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         example.quad_indices,
     ).expect("failed to create index buffer");
 
     // Create buffers for descriptorset 0, binding 0
 
-    let ubo_buffer = CpuAccessibleBuffer::from_data(
+    let ubo_buffer = Buffer::from_data(
         memory_allocator.as_ref(),
-        BufferUsage::UNIFORM_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::UNIFORM_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         UBO {
             model_view: identity(),
             projection: identity(),
@@ -472,8 +479,8 @@ fn get_command_buffers(
     app: &App,
     pipeline: &Arc<GraphicsPipeline>,
     framebuffers: &[Arc<Framebuffer>],
-    vertex_buffer: &Arc<CpuAccessibleBuffer<[Vertex]>>,
-    index_buffer: &Arc<CpuAccessibleBuffer<[u16]>>,
+    vertex_buffer: &Subbuffer<[MyVertex]>,
+    index_buffer: &Subbuffer<[u16]>,
     descriptor_set: &Arc<PersistentDescriptorSet>,
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers

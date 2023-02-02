@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use ktx::KtxInfo;
 use nalgebra_glm::{identity, Mat4, rotate, scale, translate, vec3, Vec3};
 use vulkano::{swapchain, sync};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
+use vulkano::buffer::{Buffer, BufferAllocateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassContents};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
@@ -20,7 +20,7 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState};
-use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
+use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
@@ -36,22 +36,13 @@ use winit::window::Window;
 
 use vulkano_examples::App;
 use vulkano_examples::camera::Camera;
-use vulkano_examples::gltf_loader::Scene;
-
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-pub struct Vertex {
-    pub position: [f32; 3],
-    pub uv: [f32; 2],
-}
-
-vulkano::impl_vertex!(Vertex, position, uv);
+use vulkano_examples::gltf_loader::{GltfVertex, Scene};
 
 struct Cube {
     matrices: Matrices,
     rotation: Vec3,
     descriptor_set: Option<Arc<PersistentDescriptorSet>>,
-    buffer: Option<Arc<CpuAccessibleBuffer<Matrices>>>,
+    buffer: Option<Subbuffer<Matrices>>,
 }
 
 #[repr(C)]
@@ -68,8 +59,7 @@ struct Example {
 }
 
 impl Example {
-    fn new() -> Self {
-        let model = Scene::load("./data/models/cube.gltf", false);
+    fn new(model: Scene) -> Self {
 
         let mut cubes = vec![];
 
@@ -103,7 +93,7 @@ mod vs {
 #version 450
 
 layout (location = 0) in vec3 position;
-layout (location = 1) in vec2 uv;
+layout (location = 3) in vec2 uv;
 
 layout (set = 0, binding = 0) uniform UBO
 {
@@ -151,7 +141,7 @@ fn get_pipeline(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_input_state(GltfVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -211,45 +201,22 @@ pub fn main() {
 
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
-    let mut example = Example::new();
 
-    // Create vertex buffers
-
-    let vertices = example.model.meshes[0].primitives[0].vertices.iter()
-        .zip(example.model.meshes[0].primitives[0].tex_coords.iter())
-        .map(|(v, t)| Vertex {
-            position: *v,
-            uv: *t,
-        });
-
-    let vertex_buffer = CpuAccessibleBuffer::from_iter(
-        memory_allocator.as_ref(),
-        BufferUsage::VERTEX_BUFFER,
-        false,
-        vertices,
-    )
-        .expect("failed to create buffer");
-
-    let index_buffer = CpuAccessibleBuffer::from_iter(
-        memory_allocator.as_ref(),
-        BufferUsage::INDEX_BUFFER,
-        false,
-        example.model.meshes.remove(0).primitives.remove(0).indices,
-    ).expect("failed to create index buffer");
+    let mut example = Example::new(Scene::load("./data/models/cube.gltf", &memory_allocator, true, false));
 
     // Create buffers for descriptorset 0, binding 0
-
     for cube in &mut example.cubes {
-        cube.buffer = Some(CpuAccessibleBuffer::from_data(
+        cube.buffer = Some(Buffer::from_data(
             memory_allocator.as_ref(),
-            BufferUsage::UNIFORM_BUFFER,
-            false,
+            BufferAllocateInfo {
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                ..BufferAllocateInfo::default()
+            },
             cube.matrices,
         ).unwrap());
     }
 
     // Create pipeline
-
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
     let mut viewport = Viewport {
         origin: [0.0, 0.0],
@@ -335,7 +302,7 @@ pub fn main() {
         .unwrap()
         .then_signal_fence_and_flush();
 
-    let mut command_buffers = get_command_buffers(&app, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &example.cubes);
+    let mut command_buffers = get_command_buffers(&app, &pipeline, &framebuffers, &example);
 
     let mut recreate_swapchain = true;
 
@@ -417,7 +384,7 @@ pub fn main() {
                         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
                     camera.set_perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
 
-                    command_buffers = get_command_buffers(&app, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &example.cubes);
+                    command_buffers = get_command_buffers(&app, &pipeline, &framebuffers, &example);
 
                     recreate_swapchain = false;
                 }
@@ -494,9 +461,7 @@ fn get_command_buffers(
     app: &App,
     pipeline: &Arc<GraphicsPipeline>,
     framebuffers: &[Arc<Framebuffer>],
-    vertex_buffer: &Arc<CpuAccessibleBuffer<[Vertex]>>,
-    index_buffer: &Arc<CpuAccessibleBuffer<[u16]>>,
-    cubes: &[Cube],
+    example: &Example,
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
         .iter()
@@ -519,17 +484,15 @@ fn get_command_buffers(
                     },
                     SubpassContents::Inline,
                 ).unwrap()
-                .bind_pipeline_graphics(pipeline.clone())
-                // bind one vertex buffer for both cubes (same geometry)
-                .bind_vertex_buffers(0, vertex_buffer.clone())
-                .bind_index_buffer(index_buffer.clone());
-            for cube in cubes {
+                .bind_pipeline_graphics(pipeline.clone());
+
+            for cube in &example.cubes {
                 builder
                     // bind descriptorset containing matrices and texture for cube
                     .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline.layout().clone(), 0,
-                                          vec![cube.descriptor_set.as_ref().unwrap().clone()])
-                    // draw cube
-                    .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0).unwrap();
+                                          vec![cube.descriptor_set.as_ref().unwrap().clone()]);
+
+                example.model.draw(&mut builder);
             }
 
             builder.end_render_pass()

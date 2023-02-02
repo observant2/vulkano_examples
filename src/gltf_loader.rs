@@ -1,6 +1,5 @@
-
-
 use std::ops::Mul;
+use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use gltf::accessor::Dimensions;
@@ -9,49 +8,38 @@ use gltf::{Node, Semantic};
 use gltf::buffer::Data;
 use nalgebra_glm::{Mat4, mat4_to_mat3, vec3, vec4};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer};
+use vulkano::memory::allocator::StandardMemoryAllocator;
+use vulkano::buffer::{Buffer, BufferAllocateInfo, BufferUsage, Subbuffer};
+use vulkano::pipeline::graphics::vertex_input::Vertex;
 
 pub struct Scene {
     // root nodes
     pub nodes: Vec<ModelNode>,
-    pub vertices: Vec<Vertex>,
+    pub vertices: Vec<GltfVertex>,
     pub indices: Vec<u16>,
+    pub vertex_buffer: Subbuffer<[GltfVertex]>,
+    pub index_buffer: Subbuffer<[u16]>,
 }
 
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-pub struct Vertex {
-    pub position: [f32; 3],
-    pub color: [f32; 4],
-    pub normal: [f32; 3],
-    pub uv: [f32; 2],
+struct SceneBuilder {
+    pub nodes: Vec<ModelNode>,
+    pub vertices: Vec<GltfVertex>,
+    pub indices: Vec<u16>,
+    pub vertex_buffer: Option<Subbuffer<[GltfVertex]>>,
+    pub index_buffer: Option<Subbuffer<[u16]>>,
 }
 
-vulkano::impl_vertex!(Vertex, position, color, normal, uv);
+impl SceneBuilder {
+    pub fn build(self) -> Scene {
+        Scene {
+            nodes: self.nodes,
+            vertices: self.vertices,
+            indices: self.indices,
+            vertex_buffer: self.vertex_buffer.expect("gltf_loader: vertex_buffer not initialized!"),
+            index_buffer: self.index_buffer.expect("gltf_loader: vertex_buffer not initialized!"),
+        }
+    }
 
-pub struct Mesh {
-    pub primitives: Vec<ModelPrimitive>,
-}
-
-pub type ModelNodeId = usize;
-
-pub struct ModelNode {
-    pub id: ModelNodeId,
-    pub parent: Option<ModelNodeId>,
-    pub children: Vec<ModelNodeId>,
-    pub mesh: Mesh,
-    pub transform: Mat4,
-}
-
-/// provides indices into the scene's vertex/index vector
-pub struct ModelPrimitive {
-    pub first_index: usize,
-    pub index_count: usize,
-    pub first_vertex: usize,
-    pub vertex_count: usize,
-    pub material_index: usize,
-}
-
-impl Scene {
     fn add_mesh_data(&mut self, mesh: &gltf::Mesh, buffers: &[Data]) -> Mesh {
         let mut primitives = vec![];
 
@@ -136,7 +124,7 @@ impl Scene {
             }
 
             for (v, (n, (uv, c))) in vertices.iter().zip(normals.iter().zip(tex_coords.iter().zip(colors.iter()))) {
-                self.vertices.push(Vertex {
+                self.vertices.push(GltfVertex {
                     position: *v,
                     normal: *n,
                     color: *c,
@@ -188,42 +176,101 @@ impl Scene {
         if let Some(parent) = parent {
             model_node.parent = Some(parent.id);
             parent.children.push(model_node.id);
-        } else {
-            self.nodes.push(model_node);
         }
+        self.nodes.push(model_node);
     }
+}
 
-    pub fn load(path: &str, flip_y: bool) -> Scene {
-        let (model, buffers, _) = gltf::import(path).unwrap_or_else(|_| panic!("couldn't load model at: {}", path));
+#[repr(C)]
+#[derive(Default, Copy, Clone, Zeroable, Pod, Vertex)]
+pub struct GltfVertex {
+    #[format(R32G32B32_SFLOAT)]
+    pub position: [f32; 3],
+    #[format(R32G32B32A32_SFLOAT)]
+    pub color: [f32; 4],
+    #[format(R32G32B32_SFLOAT)]
+    pub normal: [f32; 3],
+    #[format(R32G32_SFLOAT)]
+    pub uv: [f32; 2],
+}
+
+pub struct Mesh {
+    pub primitives: Vec<ModelPrimitive>,
+}
+
+pub type ModelNodeId = usize;
+
+pub struct ModelNode {
+    pub id: ModelNodeId,
+    pub parent: Option<ModelNodeId>,
+    pub children: Vec<ModelNodeId>,
+    pub mesh: Mesh,
+    pub transform: Mat4,
+}
+
+/// provides indices into the scene's vertex/index vector
+pub struct ModelPrimitive {
+    pub first_index: usize,
+    pub index_count: usize,
+    pub first_vertex: usize,
+    pub vertex_count: usize,
+    pub material_index: usize,
+}
+
+impl Scene {
+    pub fn load(path: &str, memory_allocator: &Arc<StandardMemoryAllocator>, flip_y: bool, apply_transforms: bool) -> Scene {
+        let (model, buffers, _) = gltf::import(path).unwrap_or_else(|_| panic!("couldn't load model at: {path}"));
 
         let scene = &model.scenes().collect::<Vec<_>>()[0];
 
-        let mut model = Scene {
+        let mut model = SceneBuilder {
             indices: vec![],
             vertices: vec![],
             nodes: vec![],
+            index_buffer: None,
+            vertex_buffer: None,
         };
 
         for node in scene.nodes() {
             model.load_node(&node, None, &buffers);
         }
 
-        for node in &model.nodes {
-            for primitive in &node.mesh.primitives {
-                for v in &mut model.vertices[primitive.first_vertex..][..primitive.vertex_count] {
-                    let vertex = vec4(v.position[0], v.position[1], v.position[2], 1.0);
-                    let res = node.transform.mul(&vertex);
-                    v.position = [res[0], if flip_y { -1.0 } else { 1.0 } * res[1], res[2]];
+        if apply_transforms {
+            for node in &model.nodes {
+                for primitive in &node.mesh.primitives {
+                    for v in &mut model.vertices[primitive.first_vertex..][..primitive.vertex_count] {
+                        let vertex = vec4(v.position[0], v.position[1], v.position[2], 1.0);
+                        let res = node.transform.mul(&vertex);
+                        v.position = [res[0], if flip_y { -1.0 } else { 1.0 } * res[1], res[2]];
 
-                    let normal_matrix = mat4_to_mat3(&node.transform).try_inverse().unwrap().transpose();
-                    let res = normal_matrix.mul(&vec3(v.normal[0], v.normal[1], v.normal[2]));
+                        let normal_matrix = mat4_to_mat3(&node.transform).try_inverse().unwrap().transpose();
+                        let res = normal_matrix.mul(&vec3(v.normal[0], v.normal[1], v.normal[2]));
 
-                    v.normal = [res[0], if flip_y { -1.0 } else { 1.0 } * res[1], res[2]];
+                        v.normal = [res[0], if flip_y { -1.0 } else { 1.0 } * res[1], res[2]];
+                    }
                 }
             }
         }
 
-        model
+        model.vertex_buffer = Some(Buffer::from_iter(
+            memory_allocator.as_ref(),
+            BufferAllocateInfo {
+                buffer_usage: BufferUsage::VERTEX_BUFFER,
+                ..BufferAllocateInfo::default()
+            },
+            model.vertices.clone(),
+        ).expect("failed to create vertex buffer"));
+
+        model.index_buffer = Some(Buffer::from_iter(
+            memory_allocator.as_ref(),
+            BufferAllocateInfo {
+                buffer_usage: BufferUsage::INDEX_BUFFER,
+                ..BufferAllocateInfo::default()
+            },
+            model.indices.clone(),
+        ).expect("failed to create index buffer"));
+
+        model.build()
     }
 
     fn draw_node(&self, node: &ModelNode, builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>) {
@@ -238,6 +285,9 @@ impl Scene {
     }
 
     pub fn draw(&self, builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>) {
+        builder.bind_vertex_buffers(0, self.vertex_buffer.clone());
+        builder.bind_index_buffer(self.index_buffer.clone());
+
         for node in &self.nodes {
             self.draw_node(node, builder);
         }

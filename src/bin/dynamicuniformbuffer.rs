@@ -8,7 +8,7 @@ use bytemuck::{Pod, Zeroable};
 use nalgebra_glm::{identity, Mat4, rotate, translate, vec3, Vec3};
 use rand::Rng;
 use vulkano::{swapchain, sync, DeviceSize};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
+use vulkano::buffer::{Buffer, BufferAllocateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
 use vulkano::descriptor_set::{DescriptorSet, PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
@@ -19,7 +19,7 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
-use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
+use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
@@ -38,13 +38,14 @@ use vulkano_examples::camera::Camera;
 const INSTANCES: usize = 125;
 
 #[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-pub struct Vertex {
+#[derive(Default, Copy, Clone, Zeroable, Pod, Vertex)]
+pub struct MyVertex {
+    #[format(R32G32B32_SFLOAT)]
     pub position: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
     pub color: [f32; 3],
 }
 
-vulkano::impl_vertex!(Vertex, position, color);
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
@@ -54,7 +55,7 @@ struct ViewProjection {
 }
 
 struct Example {
-    vertices: Vec<Vertex>,
+    vertices: Vec<MyVertex>,
     indices: Vec<u16>,
     rotations: [Vec3; INSTANCES],
     rotation_speeds: [Vec3; INSTANCES],
@@ -75,14 +76,14 @@ impl Example {
 
         Example {
             vertices: Vec::from([
-                Vertex { position: [-1.0, -1.0, 1.0], color: [1.0, 0.0, 0.0] },
-                Vertex { position: [1.0, -1.0, 1.0], color: [0.0, 1.0, 0.0] },
-                Vertex { position: [1.0, 1.0, 1.0], color: [0.0, 0.0, 1.0] },
-                Vertex { position: [-1.0, 1.0, 1.0], color: [0.0, 0.0, 0.0] },
-                Vertex { position: [-1.0, -1.0, -1.0], color: [1.0, 0.0, 0.0] },
-                Vertex { position: [1.0, -1.0, -1.0], color: [0.0, 1.0, 0.0] },
-                Vertex { position: [1.0, 1.0, -1.0], color: [0.0, 0.0, 1.0] },
-                Vertex { position: [-1.0, 1.0, -1.0], color: [0.0, 0.0, 0.0] },
+                MyVertex { position: [-1.0, -1.0, 1.0], color: [1.0, 0.0, 0.0] },
+                MyVertex { position: [1.0, -1.0, 1.0], color: [0.0, 1.0, 0.0] },
+                MyVertex { position: [1.0, 1.0, 1.0], color: [0.0, 0.0, 1.0] },
+                MyVertex { position: [-1.0, 1.0, 1.0], color: [0.0, 0.0, 0.0] },
+                MyVertex { position: [-1.0, -1.0, -1.0], color: [1.0, 0.0, 0.0] },
+                MyVertex { position: [1.0, -1.0, -1.0], color: [0.0, 1.0, 0.0] },
+                MyVertex { position: [1.0, 1.0, -1.0], color: [0.0, 0.0, 1.0] },
+                MyVertex { position: [-1.0, 1.0, -1.0], color: [0.0, 0.0, 0.0] },
             ]),
 
             indices: vec![
@@ -152,7 +153,7 @@ fn get_pipeline(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_input_state(MyVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -216,18 +217,22 @@ pub fn main() {
 
     // Create vertex buffers
 
-    let vertex_buffer = CpuAccessibleBuffer::from_iter(
+    let vertex_buffer = Buffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage::VERTEX_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::VERTEX_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         example.vertices,
     )
         .expect("failed to create buffer");
 
-    let index_buffer = CpuAccessibleBuffer::from_iter(
+    let index_buffer = Buffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage::INDEX_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::INDEX_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         example.indices,
     ).expect("failed to create index buffer");
 
@@ -272,18 +277,22 @@ pub fn main() {
     let aligned_data = vec![0u8; buffer_size];
 
     // This buffer will be used later to store the model matrices of the cubes
-    let dynamic_model_buffer = CpuAccessibleBuffer::from_iter(
+    let dynamic_model_buffer = Buffer::from_iter(
         memory_allocator.as_ref(),
-        BufferUsage::UNIFORM_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::UNIFORM_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         aligned_data.into_iter(),
     ).unwrap();
 
 
-    let view_projection_buffer = CpuAccessibleBuffer::from_data(
+    let view_projection_buffer = Buffer::from_data(
         memory_allocator.as_ref(),
-        BufferUsage::UNIFORM_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::UNIFORM_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         ViewProjection {
             projection: identity(),
             view: identity(),
@@ -481,8 +490,8 @@ fn get_command_buffers(
     app: &App,
     pipeline: &Arc<GraphicsPipeline>,
     framebuffers: &[Arc<Framebuffer>],
-    vertex_buffer: &Arc<CpuAccessibleBuffer<[Vertex]>>,
-    index_buffer: &Arc<CpuAccessibleBuffer<[u16]>>,
+    vertex_buffer: &Subbuffer<[MyVertex]>,
+    index_buffer: &Subbuffer<[u16]>,
     dynamic_set: &Arc<PersistentDescriptorSet>,
     dynamic_align: usize,
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {

@@ -5,7 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use nalgebra_glm::{identity, Mat4, vec3, Vec4, vec4};
 use rand::Rng;
 use vulkano::{swapchain, sync};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
+use vulkano::buffer::{Buffer, BufferAllocateInfo, BufferUsage};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
@@ -15,7 +15,7 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
-use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
+use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
 use vulkano::shader::ShaderModule;
@@ -29,7 +29,7 @@ use winit::window::Window;
 
 use vulkano_examples::App;
 use vulkano_examples::camera::Camera;
-use vulkano_examples::gltf_loader::Scene;
+use vulkano_examples::gltf_loader::{GltfVertex, Scene};
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
@@ -45,14 +45,6 @@ struct SpherePushConstantData {
     color: Vec4,
     position: Vec4,
 }
-
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-pub struct Vertex {
-    pub position: [f32; 3],
-}
-
-vulkano::impl_vertex!(Vertex, position);
 
 mod vs {
     vulkano_shaders::shader! {
@@ -115,7 +107,7 @@ fn get_pipeline(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_input_state(GltfVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -132,9 +124,7 @@ struct Example {
 }
 
 impl Example {
-    fn new() -> Self {
-        let model = Scene::load("./data/models/sphere.gltf", false);
-
+    fn new(model: Scene) -> Self {
         let mut ex = Example { spheres: Default::default(), model };
 
         let mut rnd = rand::thread_rng();
@@ -182,26 +172,10 @@ pub fn main() {
 
     let framebuffers = app.get_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
 
-    let mut example = Example::new();
-
-    let vertices = example.model.meshes[0].primitives[0].vertices.iter().map(|v| Vertex {
-        position: *v
-    });
-
-    let vertex_buffer = CpuAccessibleBuffer::from_iter(
-        memory_allocator.as_ref(),
-        BufferUsage::VERTEX_BUFFER,
-        false,
-        vertices,
-    )
-        .expect("failed to create buffer");
-
-    let index_buffer = CpuAccessibleBuffer::from_iter(
-        memory_allocator.as_ref(),
-        BufferUsage::INDEX_BUFFER,
-        false,
-        example.model.meshes.remove(0).primitives.remove(0).indices.into_iter(),
-    ).expect("failed to create index buffer");
+    let example = {
+        let model = Scene::load("./data/models/sphere.gltf", &memory_allocator, true, true);
+        Example::new(model)
+    };
 
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
     let mut viewport = Viewport {
@@ -222,10 +196,12 @@ pub fn main() {
         projection: camera.get_perspective_matrix(),
     };
 
-    let ubo = CpuAccessibleBuffer::from_data(
+    let ubo = Buffer::from_data(
         memory_allocator.as_ref(),
-        BufferUsage::UNIFORM_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::UNIFORM_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         data,
     ).unwrap();
 
@@ -251,9 +227,8 @@ pub fn main() {
     ).unwrap();
 
     let mut command_buffers: Vec<_> =
-        get_command_buffers(&app,
-                            &example.spheres, // pass push constants to command buffer
-                            &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &set);
+        get_command_buffers(&app, &example, // pass push constants to command buffer
+                            &pipeline, &framebuffers, &set);
 
     let mut recreate_swapchain = true;
 
@@ -310,7 +285,7 @@ pub fn main() {
                     viewport.clone(),
                 );
                 command_buffers =
-                    get_command_buffers(&app, &example.spheres, &new_pipeline, &new_framebuffers, &vertex_buffer, &index_buffer, &set);
+                    get_command_buffers(&app, &example, &new_pipeline, &new_framebuffers, &set);
 
 
                 let (image_i, _suboptimal, acquire_future) =
@@ -355,11 +330,9 @@ pub fn main() {
 
 fn get_command_buffers(
     app: &App,
-    spheres: &[SpherePushConstantData],
+    example: &Example,
     pipeline: &Arc<GraphicsPipeline>,
     framebuffers: &[Arc<Framebuffer>],
-    vertex_buffer: &Arc<CpuAccessibleBuffer<[Vertex]>>,
-    index_buffer: &Arc<CpuAccessibleBuffer<[u16]>>,
     set: &Arc<PersistentDescriptorSet>,
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
@@ -384,16 +357,16 @@ fn get_command_buffers(
                     SubpassContents::Inline,
                 ).unwrap()
                 .bind_pipeline_graphics(pipeline.clone())
-                .bind_vertex_buffers(0, vertex_buffer.clone())
-                .bind_index_buffer(index_buffer.clone())
+                .bind_vertex_buffers(0, example.model.vertex_buffer.clone())
+                .bind_index_buffer(example.model.index_buffer.clone())
                 .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline.layout().clone(), 0, set.clone());
 
-            for push_constant in spheres {
+            for push_constant in example.spheres {
                 builder
                     // set push constant
-                    .push_constants(pipeline.layout().clone(), 0, *push_constant)
+                    .push_constants(pipeline.layout().clone(), 0, push_constant)
                     // draw sphere with offset from push constant
-                    .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0).unwrap();
+                    .draw_indexed(example.model.index_buffer.len() as u32, 1, 0, 0, 0).unwrap();
             }
 
             builder.end_render_pass()

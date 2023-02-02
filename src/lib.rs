@@ -3,7 +3,6 @@ pub mod gltf_loader;
 
 use std::sync::Arc;
 
-use bytemuck::{Pod, Zeroable};
 use vulkano::command_buffer::allocator::{
     StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
 };
@@ -25,13 +24,6 @@ use winit::window::{Window, WindowBuilder};
 
 pub const X_SIZE: u32 = 1280;
 pub const Y_SIZE: u32 = 1024;
-
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-pub struct Vertex {
-    pub position: [f32; 3],
-}
-vulkano::impl_vertex!(Vertex, position);
 
 pub struct App {
     pub device: Arc<Device>,

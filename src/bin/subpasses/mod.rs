@@ -4,13 +4,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
-use egui_winit_vulkano::{Gui};
-use egui_winit_vulkano::egui::{Color32, WidgetText};
 use ktx::KtxInfo;
 use nalgebra_glm::{identity, Mat4, vec3, Vec3, vec3_to_vec4, Vec4, vec4};
-use rand::{Rng};
+use rand::Rng;
 use vulkano::{swapchain, sync};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
+use vulkano::buffer::{BufferUsage, Buffer, Subbuffer, BufferAllocateInfo};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassContents};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
@@ -18,14 +16,13 @@ use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorSetLayoutBi
 use vulkano::device::Device;
 use vulkano::format::{ClearValue, Format};
 use vulkano::image::{AttachmentImage, ImageAccess, ImageDimensions, ImageUsage, ImmutableImage, MipmapsCount, SwapchainImage};
-use vulkano::image::view::{ImageView};
+use vulkano::image::view::ImageView;
 use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout, StateMode};
-use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, BlendOp, ColorBlendState, ColorComponents};
-use vulkano::pipeline::graphics::depth_stencil::{CompareOp, DepthBoundsState, DepthState, DepthStencilState};
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
+use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveTopology};
 use vulkano::pipeline::graphics::multisample::MultisampleState;
-use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
+use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
@@ -48,13 +45,7 @@ use crate::shaders::{fs_composition, fs_gbuffer, fs_transparent, vs_composition,
 mod shaders;
 
 struct Example {
-    composition_ubo: Arc<CpuAccessibleBuffer<UBO>>,
-
-    composition_vertex_buffer: Arc<CpuAccessibleBuffer<[gltf_loader::Vertex]>>,
-    composition_index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
-
-    transparency_vertex_buffer: Arc<CpuAccessibleBuffer<[gltf_loader::Vertex]>>,
-    transparency_index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
+    composition_ubo: Subbuffer<UBO>,
 
     composition_scene: Scene,
     transparency_scene: Scene,
@@ -169,7 +160,7 @@ fn get_pipeline_gbuffer(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
+        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new().topology(PrimitiveTopology::TriangleList))
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -187,7 +178,7 @@ fn get_pipeline_composition(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
+        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -238,7 +229,7 @@ fn get_pipeline_transparency(
     sample_state.alpha_to_coverage_enable = true;
 
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
+        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -338,9 +329,9 @@ pub fn main() {
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
 
-    let scene = Scene::load("./data/models/samplebuilding.gltf", true);
+    let scene = Scene::load("./data/models/samplebuilding.gltf", &memory_allocator, true, true);
 
-    let glass = Scene::load("./data/models/samplebuilding_glass.gltf", true);
+    let glass = Scene::load("./data/models/samplebuilding_glass.gltf", &memory_allocator, true, true);
 
     let mut uploads = AutoCommandBufferBuilder::primary(
         &app.allocator_command_buffer,
@@ -381,10 +372,10 @@ pub fn main() {
     };
     let vs_shader = vs_transparent::load(app.device.clone()).unwrap();
     let fs_shader = fs_transparent::load(app.device.clone()).unwrap();
-    let mut pipeline_transparency = get_pipeline_transparency(
+    let pipeline_transparency = get_pipeline_transparency(
         app.device.clone(),
-        vs_shader.clone(),
-        fs_shader.clone(),
+        vs_shader,
+        fs_shader,
         render_pass.clone(),
         viewport.clone(),
     );
@@ -409,10 +400,12 @@ pub fn main() {
         viewport.clone(),
     );
 
-    let view_projection_buffer = CpuAccessibleBuffer::from_data(
+    let view_projection_buffer = Buffer::from_data(
         memory_allocator.as_ref(),
-        BufferUsage::UNIFORM_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::UNIFORM_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         ModelViewProjection {
             model: identity(),
             projection: identity(),
@@ -431,43 +424,20 @@ pub fn main() {
     ).unwrap();
 
     let mut example = Example {
-        composition_ubo: CpuAccessibleBuffer::from_data(
+        composition_ubo: Buffer::from_data(
             memory_allocator.as_ref(),
-            BufferUsage::UNIFORM_BUFFER,
-            false,
+            BufferAllocateInfo {
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                ..BufferAllocateInfo::default()
+            },
             UBO::default(),
         ).unwrap(),
-        composition_vertex_buffer: CpuAccessibleBuffer::from_iter(
-            memory_allocator.as_ref(),
-            BufferUsage::VERTEX_BUFFER,
-            false,
-            scene.vertices.clone(),
-        ).expect("failed to create buffer"),
-        composition_index_buffer: CpuAccessibleBuffer::from_iter(
-            memory_allocator.as_ref(),
-            BufferUsage::INDEX_BUFFER,
-            false,
-            scene.indices.clone(),
-        ).expect("failed to create index buffer"),
         composition_scene: scene,
-
-        transparency_vertex_buffer: CpuAccessibleBuffer::from_iter(
-            memory_allocator.as_ref(),
-            BufferUsage::VERTEX_BUFFER,
-            false,
-            glass.vertices.clone(),
-        ).expect("failed to create buffer"),
-        transparency_index_buffer: CpuAccessibleBuffer::from_iter(
-            memory_allocator.as_ref(),
-            BufferUsage::INDEX_BUFFER,
-            false,
-            glass.indices.clone(),
-        ).expect("failed to create index buffer"),
         transparency_scene: glass,
     };
 
     let transparency_sets =
-        create_transparency_sets(&framebuffers, &transparency_layout, &app.allocator_descriptor_set, &example, &glass_texture, &sampler, &view_projection_buffer);
+        create_transparency_sets(&framebuffers, transparency_layout, &app.allocator_descriptor_set, &glass_texture, &sampler, &view_projection_buffer);
 
     // Create composition pipeline
     let pipeline_composition = get_pipeline_composition(
@@ -479,7 +449,7 @@ pub fn main() {
     );
 
     let layout_read = pipeline_composition.layout().set_layouts().get(0).unwrap();
-    let composition_sets = create_composition_sets(&framebuffers, &layout_read,
+    let composition_sets = create_composition_sets(&framebuffers, layout_read,
                                                    &app.allocator_descriptor_set, &example);
 
 
@@ -498,31 +468,12 @@ pub fn main() {
         camera
     };
 
-    let mut gui = {
-        Gui::new(
-            &event_loop,
-            app.surface.clone(),
-            Some(color_format),
-            app.queue.clone(),
-            true,
-        )
-    };
-
     example.init_lights();
 
     let mut command_buffers = get_command_buffers(&app, &pipeline_gbuffer, &pipeline_composition, &pipeline_transparency, &framebuffers, &example, &view_projection_set, &composition_sets, &transparency_sets);
 
     event_loop.run(move |event, _, control_flow| {
-        if let Event::WindowEvent {
-            event: e,
-            ..
-        } = &event {
-            if !gui.update(e) {
-                camera.handle_input(&event);
-            }
-        } else {
-            camera.handle_input(&event);
-        }
+        camera.handle_input(&event);
 
         match &event {
             Event::WindowEvent {
@@ -547,10 +498,6 @@ pub fn main() {
                 }
 
                 previous_frame_end.as_mut().unwrap().cleanup_finished();
-
-                gui.immediate_ui(|gui: &mut Gui| {
-                    create_ui(gui, &mut example);
-                });
 
                 {
                     if let Ok(mut ubo) = example.composition_ubo.write() {
@@ -605,7 +552,7 @@ pub fn main() {
                     );
 
                     let layout_read = pipeline_read.layout().set_layouts().get(0).unwrap();
-                    let postprocessing_sets = create_composition_sets(&framebuffers, &layout_read, &app.allocator_descriptor_set, &example);
+                    let postprocessing_sets = create_composition_sets(&framebuffers, layout_read, &app.allocator_descriptor_set, &example);
 
                     let pipeline_transparency = get_pipeline_transparency(
                         app.device.clone(),
@@ -649,17 +596,11 @@ pub fn main() {
                     .unwrap()
                     .join(acquire_future)
                     .then_execute(app.queue.clone(), command_buffers[image_i as usize].clone())
-                    .unwrap();
-
-                // draw UI
-                // TODO: There is a memory leak somewhere on resize
-                let future = gui.draw_on_image(future, ImageView::new_default(app.swapchain_images[image_i as usize].clone()).unwrap());
-
-                // present
-                let future = future.then_swapchain_present(
-                    app.queue.clone(),
-                    SwapchainPresentInfo::swapchain_image_index(app.swapchain.clone(), image_i),
-                )
+                    .unwrap()
+                    .then_swapchain_present(
+                        app.queue.clone(),
+                        SwapchainPresentInfo::swapchain_image_index(app.swapchain.clone(), image_i),
+                    )
                     .then_signal_fence_and_flush();
 
                 match future {
@@ -668,8 +609,7 @@ pub fn main() {
                     }
                     Err(FlushError::OutOfDate) => {
                         recreate_swapchain = true;
-                        let t = sync::now(app.device.clone());
-                        previous_frame_end = Some(t.boxed());
+                        previous_frame_end = Some(sync::now(app.device.clone()).boxed());
                     }
                     Err(e) => {
                         println!("Failed to flush future: {e:?}");
@@ -685,7 +625,7 @@ pub fn main() {
     });
 }
 
-fn create_composition_sets(framebuffers: &Vec<Arc<Framebuffer>>, layout_read: &Arc<DescriptorSetLayout>, descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>, example: &Example) ->
+fn create_composition_sets(framebuffers: &[Arc<Framebuffer>], layout_read: &Arc<DescriptorSetLayout>, descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>, example: &Example) ->
 Vec<Arc<PersistentDescriptorSet>> {
     // unfortunately we need a separate descriptor set for every framebuffer, because the
     // resulting image can be different for each renderpass and each framebuffer.
@@ -702,9 +642,9 @@ Vec<Arc<PersistentDescriptorSet>> {
     }).collect()
 }
 
-fn create_transparency_sets(framebuffers: &Vec<Arc<Framebuffer>>, layout_transparency: &Arc<DescriptorSetLayout>,
-                            descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>, example: &Example,
-                            glass_texture: &Arc<ImmutableImage>, sampler: &Arc<Sampler>, model_view_projection_buffer: &Arc<CpuAccessibleBuffer<ModelViewProjection>>) ->
+fn create_transparency_sets(framebuffers: &[Arc<Framebuffer>], layout_transparency: &Arc<DescriptorSetLayout>,
+                            descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>,
+                            glass_texture: &Arc<ImmutableImage>, sampler: &Arc<Sampler>, model_view_projection_buffer: &Subbuffer<ModelViewProjection>) ->
                             Vec<Arc<PersistentDescriptorSet>> {
     framebuffers.iter().map(|f: &Arc<Framebuffer>| {
         PersistentDescriptorSet::new(
@@ -757,9 +697,7 @@ fn get_command_buffers(
 
             // Draw to gbuffer
             builder.bind_pipeline_graphics(pipeline_gbuffer.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_gbuffer.layout().clone(), 0, vec![mvp_set.clone()])
-                .bind_vertex_buffers(0, example.composition_vertex_buffer.clone())
-                .bind_index_buffer(example.composition_index_buffer.clone());
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_gbuffer.layout().clone(), 0, vec![mvp_set.clone()]);
             example.composition_scene.draw(&mut builder);
 
             // Compose final image
@@ -772,9 +710,7 @@ fn get_command_buffers(
             builder
                 .next_subpass(SubpassContents::Inline).unwrap()
                 .bind_pipeline_graphics(pipeline_transparency.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_transparency.layout().clone(), 0, vec![transparency_sets[i].clone()])
-                .bind_vertex_buffers(0, example.transparency_vertex_buffer.clone())
-                .bind_index_buffer(example.transparency_index_buffer.clone());
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_transparency.layout().clone(), 0, vec![transparency_sets[i].clone()]);
             example.transparency_scene.draw(&mut builder);
 
             builder
@@ -784,38 +720,4 @@ fn get_command_buffers(
             Arc::new(builder.build().unwrap())
         })
         .collect()
-}
-
-fn create_ui(_gui: &mut Gui, _example: &mut Example) {
-    // let ctx = gui.context();
-    // egui::Area::new("controls").movable(false).show(&ctx, |ui| {
-    //     if ui.add(egui::widgets::Button::new(ui_text("Switch Attachment", Color32::GOLD))).clicked() {
-    //         example.current_attachment = if example.current_attachment == AttachmentChoice::BrightnessContrast {
-    //             AttachmentChoice::DepthBuffer
-    //         } else {
-    //             AttachmentChoice::BrightnessContrast
-    //         };
-    //     }
-    //
-    //     match example.current_attachment {
-    //         AttachmentChoice::BrightnessContrast => {
-    //             ui.add(egui::widgets::Label::new(ui_text("Contrast and Brightness", Color32::WHITE)));
-    //             ui.add(egui::widgets::Label::new(ui_text("brightness", Color32::WHITE)));
-    //             ui.add(egui::Slider::new(&mut example.brightness, 0.0..=2.0));
-    //             ui.add(egui::widgets::Label::new(ui_text("contrast", Color32::WHITE)));
-    //             ui.add(egui::Slider::new(&mut example.contrast, 0.0..=4.0));
-    //         }
-    //         AttachmentChoice::DepthBuffer => {
-    //             ui.add(egui::widgets::Label::new(ui_text("Depth", Color32::GREEN)));
-    //             ui.add(egui::widgets::Label::new(ui_text("near", Color32::GREEN)));
-    //             ui.add(egui::Slider::new(&mut example.range.x, 0.0..=1.0));
-    //             ui.add(egui::widgets::Label::new(ui_text("far", Color32::GREEN)));
-    //             ui.add(egui::Slider::new(&mut example.range.y, 0.0..=1.0));
-    //         }
-    //     }
-    // });
-}
-
-fn ui_text(str: &str, color: Color32) -> WidgetText {
-    WidgetText::from(str).color(color)
 }

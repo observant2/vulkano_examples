@@ -12,9 +12,9 @@ gltf = { version = "1.0.0", features = ["extras", "names", "import"] }
 ktx = "0.3.2"
 nalgebra-glm = { version = "0.17.0", features = ["convert-bytemuck", "default"] }
 rand = "0.8.5"
-vulkano = {git = "https://github.com/vulkano-rs/vulkano", rev = "40fc712e656a2351de602eded0a0d32762035b83"}
-vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano", rev = "40fc712e656a2351de602eded0a0d32762035b83"}
-vulkano-win = {git = "https://github.com/vulkano-rs/vulkano", rev = "40fc712e656a2351de602eded0a0d32762035b83"}
+vulkano = {git = "https://github.com/vulkano-rs/vulkano", rev = "85e9d1c24ec612023dbc5b13e6164706ea52e963"}
+vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano", rev = "85e9d1c24ec612023dbc5b13e6164706ea52e963"}
+vulkano-win = {git = "https://github.com/vulkano-rs/vulkano", rev = "85e9d1c24ec612023dbc5b13e6164706ea52e963"}
 winit = "=0.27.5"
 
 [profile.dev]

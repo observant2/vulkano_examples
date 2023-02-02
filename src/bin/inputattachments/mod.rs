@@ -7,20 +7,20 @@ use egui_winit_vulkano::{egui, Gui};
 use egui_winit_vulkano::egui::{Color32, WidgetText};
 use nalgebra_glm::{identity, Mat4, Vec2, vec2, vec3};
 use vulkano::{swapchain, sync};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
+use vulkano::buffer::{BufferUsage, Buffer, Subbuffer, BufferAllocateInfo};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType};
 use vulkano::device::Device;
 use vulkano::format::{ClearValue, Format};
-use vulkano::image::{AttachmentImage, ImageAccess, ImageAspect, ImageAspects, ImageSubresourceRange, ImageUsage, SwapchainImage};
+use vulkano::image::{AttachmentImage, ImageAccess, ImageAspects, ImageSubresourceRange, ImageUsage, SwapchainImage};
 use vulkano::image::view::{ImageView, ImageViewCreateInfo};
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
-use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
+use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
@@ -52,10 +52,8 @@ struct Example {
     contrast: f32,
     range: Vec2,
     current_attachment: AttachmentChoice,
-    postprocessing_buffer: Arc<CpuAccessibleBuffer<UBO>>,
-    vertex_buffer: Arc<CpuAccessibleBuffer<[gltf_loader::Vertex]>>,
-    index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
-    scene: Scene
+    postprocessing_buffer: Subbuffer<UBO>,
+    scene: Scene,
 }
 
 #[repr(C)]
@@ -118,7 +116,7 @@ fn get_pipeline_write(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
+        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -136,7 +134,7 @@ fn get_pipeline_read(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<gltf_loader::Vertex>())
+        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
@@ -216,23 +214,7 @@ pub fn main() {
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
 
-    let scene = Scene::load("./data/models/treasure_smooth.gltf", true);
-
-    let vertex_buffer = CpuAccessibleBuffer::from_iter(
-        memory_allocator.as_ref(),
-        BufferUsage::VERTEX_BUFFER,
-        false,
-        scene.vertices.clone(),
-    )
-        .expect("failed to create buffer");
-
-    let index_buffer = CpuAccessibleBuffer::from_iter(
-        memory_allocator.as_ref(),
-        BufferUsage::INDEX_BUFFER,
-        false,
-        scene.indices.clone(),
-    ).expect("failed to create index buffer");
-
+    let scene = Scene::load("./data/models/treasure_smooth.gltf", &memory_allocator, true, true);
 
     // Create pipeline write
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
@@ -252,10 +234,12 @@ pub fn main() {
         viewport.clone(),
     );
 
-    let view_projection_buffer = CpuAccessibleBuffer::from_data(
+    let view_projection_buffer = Buffer::from_data(
         memory_allocator.as_ref(),
-        BufferUsage::UNIFORM_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::UNIFORM_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         ViewProjection {
             projection: identity(),
             view: identity(),
@@ -277,18 +261,18 @@ pub fn main() {
         contrast: 1.8,
         range: vec2(0.98, 1.0),
         current_attachment: AttachmentChoice::BrightnessContrast,
-        postprocessing_buffer: CpuAccessibleBuffer::from_data(
+        postprocessing_buffer: Buffer::from_data(
             memory_allocator.as_ref(),
-            BufferUsage::UNIFORM_BUFFER,
-            false,
+            BufferAllocateInfo {
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                ..BufferAllocateInfo::default()
+            },
             UBO {
                 brightness_contrast: vec2(0.5, 1.8),
                 range: vec2(0.0, 1.0),
                 attachment_index: 0,
             },
         ).unwrap(),
-        vertex_buffer,
-        index_buffer,
         scene,
     };
 
@@ -540,9 +524,7 @@ fn get_command_buffers(
 
             // Subpass 1
             builder.bind_pipeline_graphics(pipeline_write.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_write.layout().clone(), 0, vec![view_projection_set.clone()])
-                .bind_vertex_buffers(0, example.vertex_buffer.clone())
-                .bind_index_buffer(example.index_buffer.clone());
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_write.layout().clone(), 0, vec![view_projection_set.clone()]);
             example.scene.draw(&mut builder);
 
             // Subpass 2

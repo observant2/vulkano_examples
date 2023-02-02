@@ -5,9 +5,9 @@ use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use ktx::KtxInfo;
-use nalgebra_glm::{identity, Mat4, rotate, scale, translate, vec3, Vec3, Vec4, vec4};
+use nalgebra_glm::{identity, Mat4, vec3, Vec4, vec4};
 use vulkano::{swapchain, sync};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
+use vulkano::buffer::{Buffer, BufferAllocateInfo, BufferUsage};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassContents};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
@@ -20,7 +20,7 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState};
-use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
+use vulkano::pipeline::graphics::vertex_input::{Vertex};
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
@@ -34,19 +34,9 @@ use winit::event::{Event, WindowEvent};
 use winit::event_loop::ControlFlow;
 use winit::window::Window;
 
-use vulkano_examples::App;
+use vulkano_examples::{App, gltf_loader};
 use vulkano_examples::camera::Camera;
-use vulkano_examples::gltf_loader::{Mesh, Scene};
-
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-pub struct Vertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    pub uv: [f32; 2],
-    pub color: [f32; 4],
-}
-vulkano::impl_vertex!(Vertex, position, normal, uv, color);
+use vulkano_examples::gltf_loader::Scene;
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
@@ -56,11 +46,6 @@ struct UBO {
     light_pos: Vec4,
 }
 
-struct SceneObject {
-    vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
-    index_buffer: Arc<CpuAccessibleBuffer<[u16]>>,
-}
-
 mod vs {
     vulkano_shaders::shader! {
             ty: "vertex",
@@ -68,9 +53,9 @@ mod vs {
 #version 450
 
 layout (location = 0) in vec3 position;
-layout (location = 1) in vec3 normal;
-layout (location = 2) in vec2 uv;
-layout (location = 3) in vec4 color;
+layout (location = 1) in vec4 color;
+layout (location = 2) in vec3 normal;
+layout (location = 3) in vec2 uv;
 
 layout (location = 0) out vec3 outNormal;
 layout (location = 1) out vec2 outUV;
@@ -212,7 +197,7 @@ fn get_pipeline(
         };
 
     GraphicsPipeline::start()
-        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
@@ -288,10 +273,12 @@ pub fn main() {
 
     // Create buffers for descriptorset 0, binding 0
 
-    let ubo_buffer = CpuAccessibleBuffer::from_data(
+    let ubo_buffer = Buffer::from_data(
         memory_allocator.as_ref(),
-        BufferUsage::UNIFORM_BUFFER,
-        false,
+        BufferAllocateInfo {
+            buffer_usage: BufferUsage::UNIFORM_BUFFER,
+            ..BufferAllocateInfo::default()
+        },
         UBO {
             view: identity(),
             projection: identity(),
@@ -362,46 +349,9 @@ pub fn main() {
         .unwrap()
         .then_signal_fence_and_flush();
 
-    let meshes_from_file = Scene::load("./data/models/color_teapot_spheres.gltf", true).meshes;
+    let scene = Scene::load("./data/models/color_teapot_spheres.gltf", &memory_allocator, true, true);
 
-    let mut scene_objects = vec![];
-
-    for mesh in meshes_from_file {
-        for primitive in mesh.primitives {
-            let vertices: Vec<Vertex> = primitive.vertices.iter()
-                .zip(primitive.tex_coords.iter())
-                .zip(primitive.normals.iter())
-                .zip(primitive.colors.iter())
-                .map(|(((v, t), n), c)| Vertex {
-                    position: *v,
-                    normal: *n,
-                    uv: *t,
-                    color: *c,
-                }).collect();
-
-            let vertex_buffer = CpuAccessibleBuffer::from_iter(
-                memory_allocator.as_ref(),
-                BufferUsage::VERTEX_BUFFER,
-                false,
-                vertices,
-            )
-                .expect("failed to create buffer");
-
-            let index_buffer = CpuAccessibleBuffer::from_iter(
-                memory_allocator.as_ref(),
-                BufferUsage::INDEX_BUFFER,
-                false,
-                primitive.indices,
-            ).expect("failed to create index buffer");
-
-            scene_objects.push(SceneObject {
-                vertex_buffer,
-                index_buffer,
-            })
-        }
-    }
-
-    let mut command_buffers = get_command_buffers(&app, &pipelines, &framebuffers, &scene_objects, &descriptor_set);
+    let mut command_buffers = get_command_buffers(&app, &pipelines, &framebuffers, &scene, &descriptor_set);
 
     let mut recreate_swapchain = true;
 
@@ -469,7 +419,7 @@ pub fn main() {
                     let [width, height] = app.swapchain.image_extent();
                     camera.set_perspective(width as f32 / 3.0 / height as f32, f32::to_radians(60.0), 0.01, 512.0);
 
-                    command_buffers = get_command_buffers(&app, &pipelines, &framebuffers, &scene_objects, &descriptor_set);
+                    command_buffers = get_command_buffers(&app, &pipelines, &framebuffers, &scene, &descriptor_set);
 
                     recreate_swapchain = false;
                 }
@@ -532,7 +482,7 @@ fn get_command_buffers(
     app: &App,
     pipelines: &[Arc<GraphicsPipeline>; 3],
     framebuffers: &[Arc<Framebuffer>],
-    scene_objects: &Vec<SceneObject>,
+    scene: &Scene,
     descriptor_set: &Arc<PersistentDescriptorSet>,
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
@@ -568,15 +518,9 @@ fn get_command_buffers(
             for i in 0..3 {
                 viewport.origin[0] = (window.inner_size().width as f32 / 3.0) * i as f32;
                 builder.set_viewport(0, [viewport.clone()])
-                    .bind_pipeline_graphics(pipelines[i].clone());
-
-                for scene_object in scene_objects {
-                    builder
-                        .bind_vertex_buffers(0, scene_object.vertex_buffer.clone())
-                        .bind_index_buffer(scene_object.index_buffer.clone())
-                        .bind_descriptor_sets(PipelineBindPoint::Graphics, pipelines[i].layout().clone(), 0, vec![descriptor_set.clone()])
-                        .draw_indexed(scene_object.index_buffer.len() as u32, 1, 0, 0, 0).unwrap();
-                }
+                    .bind_pipeline_graphics(pipelines[i].clone())
+                    .bind_descriptor_sets(PipelineBindPoint::Graphics, pipelines[i].layout().clone(), 0, vec![descriptor_set.clone()]);
+                scene.draw(&mut builder);
             }
 
             builder.end_render_pass()
