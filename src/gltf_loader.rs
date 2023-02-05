@@ -1,4 +1,5 @@
 use std::ops::Mul;
+use std::process::exit;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -11,6 +12,19 @@ use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::buffer::{Buffer, BufferAllocateInfo, BufferUsage, Subbuffer};
 use vulkano::pipeline::graphics::vertex_input::Vertex;
+
+#[repr(C)]
+#[derive(Default, Copy, Clone, Zeroable, Pod, Vertex)]
+pub struct GltfVertex {
+    #[format(R32G32B32_SFLOAT)]
+    pub position: [f32; 3],
+    #[format(R32G32B32A32_SFLOAT)]
+    pub color: [f32; 4],
+    #[format(R32G32B32_SFLOAT)]
+    pub normal: [f32; 3],
+    #[format(R32G32_SFLOAT)]
+    pub uv: [f32; 2],
+}
 
 pub struct Scene {
     // root nodes
@@ -181,19 +195,6 @@ impl SceneBuilder {
     }
 }
 
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod, Vertex)]
-pub struct GltfVertex {
-    #[format(R32G32B32_SFLOAT)]
-    pub position: [f32; 3],
-    #[format(R32G32B32A32_SFLOAT)]
-    pub color: [f32; 4],
-    #[format(R32G32B32_SFLOAT)]
-    pub normal: [f32; 3],
-    #[format(R32G32_SFLOAT)]
-    pub uv: [f32; 2],
-}
-
 pub struct Mesh {
     pub primitives: Vec<ModelPrimitive>,
 }
@@ -219,7 +220,9 @@ pub struct ModelPrimitive {
 
 impl Scene {
     pub fn load(path: &str, memory_allocator: &Arc<StandardMemoryAllocator>, flip_y: bool, apply_transforms: bool) -> Scene {
-        let (model, buffers, _) = gltf::import(path).unwrap_or_else(|_| panic!("couldn't load model at: {path}"));
+        let m = gltf::import(path);
+
+        let (model, buffers, _) = m.unwrap();
 
         let scene = &model.scenes().collect::<Vec<_>>()[0];
 

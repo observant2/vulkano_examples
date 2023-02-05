@@ -1,21 +1,26 @@
 pub mod camera;
 pub mod gltf_loader;
 
+use std::io::Cursor;
 use std::sync::Arc;
+use ktx::KtxInfo;
 
 use vulkano::command_buffer::allocator::{
     StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
 };
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryCommandBufferAbstract};
 use vulkano::descriptor_set::allocator::{StandardDescriptorSetAllocator};
 use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{AttachmentImage, ImageAccess, ImageUsage, SwapchainImage};
+use vulkano::image::{AttachmentImage, ImageAccess, ImageDimensions, ImageUsage, ImmutableImage, MipmapsCount, SwapchainImage};
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
+use vulkano::sampler::{Sampler, SamplerCreateInfo};
 use vulkano::swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo};
+use vulkano::sync::GpuFuture;
 use vulkano::VulkanLibrary;
 use vulkano_win::VkSurfaceBuild;
 use winit::dpi::{PhysicalSize, Size};
@@ -35,6 +40,7 @@ pub struct App {
     pub swapchain_images: Vec<Arc<SwapchainImage>>,
     pub allocator_command_buffer: Arc<StandardCommandBufferAllocator>,
     pub allocator_descriptor_set: Arc<StandardDescriptorSetAllocator>,
+    pub allocator_memory: Arc<StandardMemoryAllocator>,
 }
 
 impl App {
@@ -129,7 +135,7 @@ impl App {
                 min_image_count: caps.min_image_count + 1,
                 image_format,
                 image_extent: window.inner_size().into(),
-                image_usage: ImageUsage::COLOR_ATTACHMENT ,
+                image_usage: ImageUsage::COLOR_ATTACHMENT,
                 composite_alpha,
                 present_mode: PresentMode::FifoRelaxed,
                 ..Default::default()
@@ -137,16 +143,19 @@ impl App {
         )
             .unwrap();
 
-        let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
+        let allocator_command_buffer = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
             StandardCommandBufferAllocatorCreateInfo::default(),
         ));
 
-        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(device.clone()));
+        let allocator_descriptor_set = Arc::new(StandardDescriptorSetAllocator::new(device.clone()));
+
+        let allocator_memory = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
         (App {
-            allocator_command_buffer: command_buffer_allocator,
-            allocator_descriptor_set: descriptor_set_allocator,
+            allocator_command_buffer,
+            allocator_descriptor_set,
+            allocator_memory,
             device,
             instance,
             surface,
@@ -173,5 +182,45 @@ impl App {
                     .unwrap()
             })
             .collect::<Vec<_>>()
+    }
+
+    pub fn load_texture_ktx(&self, bytes: &[u8]) -> Arc<ImmutableImage> {
+        let mut uploads = AutoCommandBufferBuilder::primary(
+            &self.allocator_command_buffer,
+            self.queue_family_index,
+            CommandBufferUsage::OneTimeSubmit,
+        )
+            .unwrap();
+        let texture = {
+            let cursor = Cursor::new(bytes);
+            let decoder = ktx::Decoder::new(cursor).unwrap();
+            let mips = decoder.mipmap_levels();
+            let width = decoder.pixel_width();
+            let height = decoder.pixel_height();
+            let image_data = decoder.read_textures().next().unwrap();
+            let dimensions = ImageDimensions::Dim2d {
+                width,
+                height,
+                array_layers: 1,
+            };
+            ImmutableImage::from_iter(
+                &self.allocator_memory,
+                image_data,
+                dimensions,
+                MipmapsCount::Specific(mips),
+                Format::R8G8B8A8_UNORM,
+                &mut uploads,
+            )
+                .unwrap()
+        };
+
+        let _ = uploads
+            .build()
+            .unwrap()
+            .execute(self.queue.clone())
+            .unwrap()
+            .then_signal_fence_and_flush();
+
+        texture
     }
 }

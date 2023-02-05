@@ -29,3 +29,7 @@ path = "./src/bin/inputattachments/mod.rs"
 [[bin]]
 name = "subpasses"
 path = "./src/bin/subpasses/mod.rs"
+
+[[bin]]
+name = "ssao"
+path = "./src/bin/ssao/mod.rs"

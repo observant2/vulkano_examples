@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
+use egui_winit_vulkano::egui::Image;
 use nalgebra_glm::{identity, Mat4, vec3, Vec3, vec3_to_vec4, Vec4, vec4};
 use rand::Rng;
 use vulkano::{swapchain, sync};
@@ -11,20 +12,20 @@ use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, Prim
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType};
+use vulkano::descriptor_set::layout::DescriptorType::SampledImage;
 use vulkano::device::Device;
 use vulkano::format::{ClearValue, Format};
-use vulkano::image::{AttachmentImage, ImageAccess, ImageUsage, ImmutableImage, MipmapsCount, SwapchainImage};
+use vulkano::image::{AttachmentImage, ImageAccess, ImageUsage, SwapchainImage};
 use vulkano::image::view::ImageView;
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveTopology};
-use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::sampler::{Sampler, SamplerCreateInfo};
+use vulkano::sampler::{Filter, Sampler, SamplerCreateInfo, SamplerMipmapMode};
 use vulkano::shader::{ShaderStages};
 use vulkano::swapchain::{
     AcquireError, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo,
@@ -38,42 +39,17 @@ use vulkano_examples::{App, gltf_loader};
 use vulkano_examples::camera::{Camera, CameraType};
 use vulkano_examples::gltf_loader::Scene;
 
-use crate::shaders::{fs_composition, fs_gbuffer, fs_transparent, vs_composition, vs_gbuffer, vs_transparent};
+use crate::shaders::{fs_composition, fs_gbuffer, vs_fullscreen, vs_gbuffer};
 
 mod shaders;
 
 struct Example {
-    composition_ubo: Subbuffer<UBO>,
+    ssao_settings: Subbuffer<SsaoSettings>,
 
     composition_scene: Scene,
-    transparency_scene: Scene,
-}
+    view_projection_set: Arc<PersistentDescriptorSet>,
 
-impl Example {
-    pub fn init_lights(&mut self) {
-        let colors = [
-            vec3(1.0, 1.0, 1.0),
-            vec3(1.0, 0.0, 0.0),
-            vec3(0.0, 1.0, 0.0),
-            vec3(0.0, 0.0, 1.0),
-            vec3(1.0, 1.0, 0.0),
-        ];
-
-        let mut rand = rand::thread_rng();
-
-        if let Ok(mut ubo) = self.composition_ubo.write() {
-            for light in &mut ubo.lights {
-                light.position = vec4(
-                    rand.gen_range(-6.0..6.0),
-                    0.25 + rand.gen_range(0.0..4.0),
-                    rand.gen_range(-6.0..6.0),
-                    1.0,
-                );
-                light.color = colors[rand.gen_range(0..colors.len())];
-                light.radius = rand.gen_range(1.0..2.0);
-            }
-        }
-    }
+    sampler: Arc<Sampler>,
 }
 
 #[repr(C)]
@@ -85,29 +61,11 @@ struct ModelViewProjection {
 }
 
 #[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-struct Light {
-    position: Vec4,
-    color: Vec3,
-    radius: f32,
-}
-
-const NUM_LIGHTS: usize = 64;
-
-#[repr(C)]
 #[derive(Copy, Clone, Zeroable, Pod)]
-struct UBO {
-    view_pos: Vec4,
-    lights: [Light; NUM_LIGHTS],
-}
-
-impl Default for UBO {
-    fn default() -> Self {
-        UBO {
-            view_pos: Vec4::zeros(),
-            lights: [Light::default(); NUM_LIGHTS],
-        }
-    }
+struct SsaoSettings {
+    ssao: i32,
+    ssao_only: i32,
+    ssao_blur: i32,
 }
 
 const DEPTH_FORMAT: Format = Format::D32_SFLOAT;
@@ -115,33 +73,50 @@ const POSITION_FORMAT: Format = Format::R16G16B16A16_SFLOAT;
 const NORMAL_FORMAT: Format = Format::R16G16B16A16_SFLOAT;
 const ALBEDO_FORMAT: Format = Format::R8G8B8A8_UNORM;
 
-fn get_framebuffers(memory_allocator: &Arc<StandardMemoryAllocator>, images: &[Arc<SwapchainImage>], render_pass: &Arc<RenderPass>) -> Vec<Arc<Framebuffer>> {
+fn get_gbuffer_framebuffers(memory_allocator: &Arc<StandardMemoryAllocator>, images: &[Arc<SwapchainImage>], render_pass: &Arc<RenderPass>) -> Vec<Arc<Framebuffer>> {
     images
         .iter()
         .map(|image| {
             let color = ImageView::new_default(image.clone()).unwrap();
             let position = ImageView::new_default(
                 AttachmentImage::with_usage(memory_allocator,
-                                            image.dimensions().width_height(), POSITION_FORMAT,
-                                            ImageUsage::TRANSIENT_ATTACHMENT | ImageUsage::INPUT_ATTACHMENT).unwrap()
+                                            image.dimensions().width_height(), POSITION_FORMAT, ImageUsage::SAMPLED).unwrap()
             ).unwrap();
             let normal = ImageView::new_default(
                 AttachmentImage::with_usage(memory_allocator,
-                                            image.dimensions().width_height(), NORMAL_FORMAT,
-                                            ImageUsage::TRANSIENT_ATTACHMENT | ImageUsage::INPUT_ATTACHMENT).unwrap()
+                                            image.dimensions().width_height(), NORMAL_FORMAT, ImageUsage::SAMPLED).unwrap()
             ).unwrap();
             let albedo = ImageView::new_default(
                 AttachmentImage::with_usage(memory_allocator,
-                                            image.dimensions().width_height(), ALBEDO_FORMAT,
-                                            ImageUsage::TRANSIENT_ATTACHMENT | ImageUsage::INPUT_ATTACHMENT).unwrap()
+                                            image.dimensions().width_height(), ALBEDO_FORMAT, ImageUsage::SAMPLED).unwrap()
+            ).unwrap();
+            let depth_buffer = ImageView::new_default(
+                AttachmentImage::transient(memory_allocator,
+                                            image.dimensions().width_height(), DEPTH_FORMAT).unwrap()
             ).unwrap();
 
-            let depth_buffer = ImageView::new_default(AttachmentImage::transient(memory_allocator,
-                                                                                 image.dimensions().width_height(), DEPTH_FORMAT).unwrap()).unwrap();
             Framebuffer::new(
                 render_pass.clone(),
                 FramebufferCreateInfo {
                     attachments: vec![color, position, normal, albedo, depth_buffer],
+                    ..Default::default()
+                },
+            )
+                .unwrap()
+        })
+        .collect::<Vec<_>>()
+}
+
+fn get_simple_framebuffers(images: &[Arc<SwapchainImage>], render_pass: &Arc<RenderPass>) -> Vec<Arc<Framebuffer>> {
+    images
+        .iter()
+        .map(|image| {
+            let color = ImageView::new_default(image.clone()).unwrap();
+
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![color],
                     ..Default::default()
                 },
             )
@@ -170,100 +145,45 @@ fn get_pipeline_gbuffer(
 }
 
 fn get_pipeline_composition(
-    device: Arc<Device>,
-    render_pass: Arc<RenderPass>,
+    app: &App,
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
-    let vs = vs_composition::load(device.clone()).unwrap();
-    let fs = fs_composition::load(device.clone()).unwrap();
+    let vs = vs_fullscreen::load(app.device.clone()).unwrap();
+    let fs = fs_composition::load(app.device.clone()).unwrap();
+    let render_pass = get_simple_render_pass(app);
     GraphicsPipeline::start()
         .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
         .fragment_shader(fs.entry_point("main").unwrap(), ())
-        .depth_stencil_state(DepthStencilState::simple_depth_test())
-        .render_pass(Subpass::from(render_pass, 1).unwrap())
-        .with_pipeline_layout(device.clone(), PipelineLayout::new(device.clone(), PipelineLayoutCreateInfo {
-            set_layouts: vec![
-                DescriptorSetLayout::new(device, DescriptorSetLayoutCreateInfo {
-                    bindings: BTreeMap::from([
-                        // position
-                        (0, DescriptorSetLayoutBinding {
-                            stages: ShaderStages::FRAGMENT,
-                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::InputAttachment)
-                        }),
-                        // normal
-                        (1, DescriptorSetLayoutBinding {
-                            stages: ShaderStages::FRAGMENT,
-                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::InputAttachment)
-                        }),
-                        // albedo
-                        (2, DescriptorSetLayoutBinding {
-                            stages: ShaderStages::FRAGMENT,
-                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::InputAttachment)
-                        }),
-                        (3, DescriptorSetLayoutBinding {
-                            stages: ShaderStages::FRAGMENT,
-                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBuffer)
-                        }),
-                    ]),
-                    ..DescriptorSetLayoutCreateInfo::default()
-                }).unwrap()
-            ],
-            ..PipelineLayoutCreateInfo::default()
-        }).unwrap())
+        .render_pass(Subpass::from(render_pass, 0).unwrap())
+        .build(app.device.clone())
         .unwrap()
 }
 
-fn get_pipeline_transparency(
-    device: Arc<Device>,
-    render_pass: Arc<RenderPass>,
-    viewport: Viewport,
-) -> Arc<GraphicsPipeline> {
-    let vs = vs_transparent::load(device.clone()).unwrap();
-    let fs = fs_transparent::load(device.clone()).unwrap();
-    let mut sample_state = MultisampleState::new();
-    // we use this instead of the technique in the original
-    sample_state.alpha_to_coverage_enable = true;
-
-    GraphicsPipeline::start()
-        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
-        .vertex_shader(vs.entry_point("main").unwrap(), ())
-        .input_assembly_state(InputAssemblyState::new())
-        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
-        .fragment_shader(fs.entry_point("main").unwrap(), ())
-        .depth_stencil_state(DepthStencilState::simple_depth_test())
-        .multisample_state(sample_state)
-        .render_pass(Subpass::from(render_pass, 2).unwrap())
-        .with_pipeline_layout(device.clone(), PipelineLayout::new(device.clone(), PipelineLayoutCreateInfo {
-            set_layouts: vec![
-                DescriptorSetLayout::new(device, DescriptorSetLayoutCreateInfo {
-                    bindings: BTreeMap::from([
-                        (0, DescriptorSetLayoutBinding {
-                            stages: ShaderStages::VERTEX,
-                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBuffer)
-                        }),
-                        // position from gbuffer pass
-                        (1, DescriptorSetLayoutBinding {
-                            stages: ShaderStages::FRAGMENT,
-                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::InputAttachment)
-                        }),
-                        (2, DescriptorSetLayoutBinding {
-                            stages: ShaderStages::FRAGMENT,
-                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::CombinedImageSampler)
-                        }),
-                    ]),
-                    ..DescriptorSetLayoutCreateInfo::default()
-                }).unwrap()
-            ],
-            ..PipelineLayoutCreateInfo::default()
-        }).unwrap())
-        .unwrap()
+fn get_simple_render_pass(app: &App) -> Arc<RenderPass> {
+    vulkano::ordered_passes_renderpass!(
+        app.device.clone(),
+        attachments: {
+            color: {
+                load: Clear,
+                store: Store,
+                format: app.swapchain.image_format(),
+                samples: 1,
+            }
+        },
+        passes: [
+        {
+            color: [color],
+            depth_stencil: {},
+            input: []
+        }]
+    ).unwrap()
 }
 
 pub fn main() {
-    let (mut app, event_loop) = App::new("subpasses");
+    let (mut app, event_loop) = App::new("SSAO");
 
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(app.device.clone()));
 
@@ -280,25 +200,25 @@ pub fn main() {
             },
             position: {
                 load: Clear,
-                store: DontCare,
+                store: Store, // store for later use in subsequent render passes
                 format: POSITION_FORMAT,
                 samples: 1,
             },
             normal: {
                 load: Clear,
-                store: DontCare,
+                store: Store,
                 format: NORMAL_FORMAT,
                 samples: 1,
             },
             albedo: {
                 load: Clear,
-                store: DontCare,
+                store: Store,
                 format: ALBEDO_FORMAT,
                 samples: 1,
             },
             depth: {
                 load: Clear,
-                store: DontCare,
+                store: Store,
                 format: DEPTH_FORMAT,
                 samples: 1,
             }
@@ -309,32 +229,16 @@ pub fn main() {
             color: [color, position, normal, albedo],
             depth_stencil: {depth},
             input: []
-        },
-        {// composition
-            color: [color],
-            depth_stencil: {},
-            input: [position, normal, albedo]
-        },
-        {// transparency
-            color: [color],
-            depth_stencil: {depth},
-            input: [position] // contains depth in its alpha component
         }]
     )
         .unwrap();
 
-    let mut framebuffers = get_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
+    let mut framebuffers = get_gbuffer_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
 
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
 
-    let scene = Scene::load("./data/models/samplebuilding.gltf", &memory_allocator, true, true);
-
-    let glass = Scene::load("./data/models/samplebuilding_glass.gltf", &memory_allocator, true, true);
-
-    let glass_texture = app.load_texture_ktx(include_bytes!("../../../data/textures/colored_glass_rgba.ktx"));
-
-    let sampler = Sampler::new(app.device.clone(), SamplerCreateInfo::simple_repeat_linear()).unwrap();
+    let scene = Scene::load("./data/models/treasure_smooth.gltf", &memory_allocator, true, true);
 
     let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
     let mut viewport = Viewport {
@@ -342,13 +246,6 @@ pub fn main() {
         dimensions: window.inner_size().into(),
         depth_range: 0.0..1.0,
     };
-    let pipeline_transparency = get_pipeline_transparency(
-        app.device.clone(),
-        render_pass.clone(),
-        viewport.clone(),
-    );
-
-    let transparency_layout = pipeline_transparency.layout().set_layouts().get(0).unwrap();
 
     // Create gbuffer pipeline
     let mut pipeline_gbuffer = get_pipeline_gbuffer(
@@ -370,48 +267,48 @@ pub fn main() {
         },
     ).unwrap();
 
-    let transparency_sets =
-        create_transparency_sets(&framebuffers, transparency_layout, &app.allocator_descriptor_set, &glass_texture, &sampler, &view_projection_buffer);
-
     let layout = pipeline_gbuffer.layout().set_layouts().get(0).unwrap();
 
-    let view_projection_set = PersistentDescriptorSet::new(
-        &app.allocator_descriptor_set,
-        layout.clone(),
-        [
-            WriteDescriptorSet::buffer(0, view_projection_buffer.clone()),
-        ],
-    ).unwrap();
-
     let mut example = Example {
-        composition_ubo: Buffer::from_data(
+        ssao_settings: Buffer::from_data(
             memory_allocator.as_ref(),
             BufferAllocateInfo {
                 buffer_usage: BufferUsage::UNIFORM_BUFFER,
                 ..BufferAllocateInfo::default()
             },
-            UBO::default(),
+            SsaoSettings {
+                ssao: 0,
+                ssao_blur: 1,
+                ssao_only: 0,
+            },
+        ).unwrap(),
+        view_projection_set: PersistentDescriptorSet::new(
+            &app.allocator_descriptor_set,
+            layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, view_projection_buffer.clone()),
+            ],
         ).unwrap(),
         composition_scene: scene,
-        transparency_scene: glass,
+        sampler: Sampler::new(app.device.clone(), SamplerCreateInfo {
+            min_filter: Filter::Nearest,
+            mag_filter: Filter::Nearest,
+            mipmap_mode: SamplerMipmapMode::Nearest,
+            ..SamplerCreateInfo::default()
+        }).unwrap(),
     };
 
     // Create composition pipeline
-    let pipeline_composition = get_pipeline_composition(
-        app.device.clone(),
-        render_pass.clone(),
-        viewport.clone(),
-    );
+    let pipeline_composition = get_pipeline_composition(&app, viewport.clone());
+    let mut composition_framebuffers = get_simple_framebuffers(&app.swapchain_images, &get_simple_render_pass(&app));
 
     let layout_read = pipeline_composition.layout().set_layouts().get(0).unwrap();
     let composition_sets = create_composition_sets(&framebuffers, layout_read,
                                                    &app.allocator_descriptor_set, &example);
 
-
     let mut recreate_swapchain = true;
 
     let mut last_frame = Instant::now();
-
 
     let mut camera = {
         let mut camera = Camera::new(vec3(1.65, 1.75, -6.15), aspect_ratio, f32::to_radians(60.0), 0.1, 256.0);
@@ -422,11 +319,9 @@ pub fn main() {
         camera
     };
 
-    example.init_lights();
-
     let mut previous_frame_end = Some(sync::now(app.device.clone()).boxed());
 
-    let mut command_buffers = get_command_buffers(&app, &pipeline_gbuffer, &pipeline_composition, &pipeline_transparency, &framebuffers, &example, &view_projection_set, &composition_sets, &transparency_sets);
+    let mut command_buffers = get_command_buffers(&app, &pipeline_gbuffer, &pipeline_composition, &framebuffers, &composition_framebuffers, &example, &composition_sets);
 
     event_loop.run(move |event, _, control_flow| {
         camera.handle_input(&event);
@@ -455,14 +350,6 @@ pub fn main() {
 
                 previous_frame_end.as_mut().unwrap().cleanup_finished();
 
-                {
-                    if let Ok(mut ubo) = example.composition_ubo.write() {
-                        let mut pos = vec3_to_vec4(&camera.get_position());
-                        pos.w = 1.0;
-                        ubo.view_pos = pos;
-                    }
-                }
-
                 let window = app.surface.object().unwrap().downcast_ref::<Window>().unwrap();
 
                 if window.inner_size().width == 0 || window.inner_size().height == 0 {
@@ -488,7 +375,8 @@ pub fn main() {
                         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
                     camera.set_perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
 
-                    framebuffers = get_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
+                    framebuffers = get_gbuffer_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
+                    composition_framebuffers = get_simple_framebuffers(&app.swapchain_images, &get_simple_render_pass(&app));
 
                     viewport.dimensions = window.inner_size().into();
                     pipeline_gbuffer = get_pipeline_gbuffer(
@@ -497,23 +385,12 @@ pub fn main() {
                         viewport.clone(),
                     );
 
-                    let pipeline_read = get_pipeline_composition(
-                        app.device.clone(),
-                        render_pass.clone(),
-                        viewport.clone(),
-                    );
+                    let pipeline_read = get_pipeline_composition(&app, viewport.clone());
 
                     let layout_read = pipeline_read.layout().set_layouts().get(0).unwrap();
-                    let postprocessing_sets = create_composition_sets(&framebuffers, layout_read, &app.allocator_descriptor_set, &example);
+                    let composition_sets = create_composition_sets(&framebuffers, layout_read, &app.allocator_descriptor_set, &example);
 
-                    let pipeline_transparency = get_pipeline_transparency(
-                        app.device.clone(),
-                        render_pass.clone(),
-                        viewport.clone(),
-                    );
-
-                    command_buffers = get_command_buffers(&app, &pipeline_gbuffer, &pipeline_read, &pipeline_transparency, &framebuffers, &example,
-                                                          &view_projection_set, &postprocessing_sets, &transparency_sets);
+                    command_buffers = get_command_buffers(&app, &pipeline_gbuffer, &pipeline_read, &framebuffers, &composition_framebuffers, &example, &composition_sets);
 
                     recreate_swapchain = false;
                 }
@@ -584,28 +461,13 @@ Vec<Arc<PersistentDescriptorSet>> {
             descriptor_set_allocator,
             layout_read.clone(),
             [
-                WriteDescriptorSet::image_view(0, f.attachments()[1].clone()), // position
-                WriteDescriptorSet::image_view(1, f.attachments()[2].clone()), // normal
-                WriteDescriptorSet::image_view(2, f.attachments()[3].clone()), // albedo
-                WriteDescriptorSet::buffer(3, example.composition_ubo.clone()),
+                WriteDescriptorSet::image_view_sampler(0, f.attachments()[1].clone(), example.sampler.clone()), // position
+                WriteDescriptorSet::image_view_sampler(1, f.attachments()[2].clone(), example.sampler.clone()), // normal
+                WriteDescriptorSet::image_view_sampler(2, f.attachments()[3].clone(), example.sampler.clone()), // albedo
+                WriteDescriptorSet::image_view_sampler(3, f.attachments()[3].clone(), example.sampler.clone()), // TODO: ssao
+                WriteDescriptorSet::image_view_sampler(4, f.attachments()[3].clone(), example.sampler.clone()), // TODO: ssao blur
+                WriteDescriptorSet::buffer(5, example.ssao_settings.clone()),
             ]).unwrap()
-    }).collect()
-}
-
-fn create_transparency_sets(framebuffers: &[Arc<Framebuffer>], layout_transparency: &Arc<DescriptorSetLayout>,
-                            descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>,
-                            glass_texture: &Arc<ImmutableImage>, sampler: &Arc<Sampler>, model_view_projection_buffer: &Subbuffer<ModelViewProjection>) ->
-                            Vec<Arc<PersistentDescriptorSet>> {
-    framebuffers.iter().map(|f: &Arc<Framebuffer>| {
-        PersistentDescriptorSet::new(
-            descriptor_set_allocator,
-            layout_transparency.clone(),
-            [
-                WriteDescriptorSet::buffer(0, model_view_projection_buffer.clone()),
-                WriteDescriptorSet::image_view(1, f.attachments()[1].clone()),
-                WriteDescriptorSet::image_view_sampler(2, ImageView::new_default(glass_texture.clone()).unwrap(), sampler.clone())
-            ],
-        ).unwrap()
     }).collect()
 }
 
@@ -613,17 +475,16 @@ fn get_command_buffers(
     app: &App,
     pipeline_gbuffer: &Arc<GraphicsPipeline>,
     pipeline_composition: &Arc<GraphicsPipeline>,
-    pipeline_transparency: &Arc<GraphicsPipeline>,
     framebuffers: &[Arc<Framebuffer>],
+    composition_framebuffers: &[Arc<Framebuffer>],
     example: &Example,
-    mvp_set: &Arc<PersistentDescriptorSet>,
     composition_sets: &[Arc<PersistentDescriptorSet>],
-    transparency_sets: &[Arc<PersistentDescriptorSet>],
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
         .iter()
+        .zip(composition_framebuffers)
         .enumerate()
-        .map(|(i, framebuffer)| {
+        .map(|(i, (framebuffer, composition_framebuffer))| {
             let mut builder = AutoCommandBufferBuilder::primary(
                 app.allocator_command_buffer.as_ref(),
                 app.queue_family_index,
@@ -647,21 +508,26 @@ fn get_command_buffers(
 
             // Draw to gbuffer
             builder.bind_pipeline_graphics(pipeline_gbuffer.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_gbuffer.layout().clone(), 0, vec![mvp_set.clone()]);
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_gbuffer.layout().clone(), 0, vec![example.view_projection_set.clone()]);
             example.composition_scene.draw(&mut builder);
+            builder.end_render_pass().unwrap();
+
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: vec![
+                            Some([0.1, 0.1, 0.1, 1.0].into()),
+                        ],
+                        ..RenderPassBeginInfo::framebuffer(composition_framebuffer.clone())
+                    },
+                    SubpassContents::Inline,
+                ).unwrap();
 
             // Compose final image
             builder
-                .next_subpass(SubpassContents::Inline).unwrap()
                 .bind_pipeline_graphics(pipeline_composition.clone())
                 .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_composition.layout().clone(), 0, vec![composition_sets[i].clone()])
                 .draw(3, 1, 0, 0).unwrap();
-
-            builder
-                .next_subpass(SubpassContents::Inline).unwrap()
-                .bind_pipeline_graphics(pipeline_transparency.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_transparency.layout().clone(), 0, vec![transparency_sets[i].clone()]);
-            example.transparency_scene.draw(&mut builder);
 
             builder
                 .end_render_pass()
