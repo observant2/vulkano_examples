@@ -1,7 +1,7 @@
 pub mod camera;
 pub mod gltf_loader;
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::sync::Arc;
 use ktx::KtxInfo;
 
@@ -184,7 +184,7 @@ impl App {
             .collect::<Vec<_>>()
     }
 
-    pub fn load_texture_ktx(&self, bytes: &[u8]) -> Arc<ImmutableImage> {
+    pub fn load_texture(&self, image_bytes: &[u8], width: u32, height: u32, mipmaps: u32, format: Format) -> Arc<ImmutableImage> {
         let mut uploads = AutoCommandBufferBuilder::primary(
             &self.allocator_command_buffer,
             self.queue_family_index,
@@ -192,12 +192,6 @@ impl App {
         )
             .unwrap();
         let texture = {
-            let cursor = Cursor::new(bytes);
-            let decoder = ktx::Decoder::new(cursor).unwrap();
-            let mips = decoder.mipmap_levels();
-            let width = decoder.pixel_width();
-            let height = decoder.pixel_height();
-            let image_data = decoder.read_textures().next().unwrap();
             let dimensions = ImageDimensions::Dim2d {
                 width,
                 height,
@@ -205,10 +199,10 @@ impl App {
             };
             ImmutableImage::from_iter(
                 &self.allocator_memory,
-                image_data,
+                image_bytes.to_owned(),
                 dimensions,
-                MipmapsCount::Specific(mips),
-                Format::R8G8B8A8_UNORM,
+                MipmapsCount::Specific(mipmaps),
+                format,
                 &mut uploads,
             )
                 .unwrap()
@@ -222,5 +216,15 @@ impl App {
             .then_signal_fence_and_flush();
 
         texture
+    }
+
+    pub fn load_texture_ktx(&self, bytes: &[u8]) -> Arc<ImmutableImage> {
+        let cursor = Cursor::new(bytes);
+        let decoder = ktx::Decoder::new(cursor).unwrap();
+        let mips = decoder.mipmap_levels();
+        let width = decoder.pixel_width();
+        let height = decoder.pixel_height();
+        let image_data = decoder.read_textures().next().unwrap();
+        self.load_texture(&image_data, width, height, mips, Format::R8G8B8A8_UNORM)
     }
 }

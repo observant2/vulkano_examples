@@ -7,38 +7,34 @@ pub mod vs_gbuffer {
 layout (location = 0) in vec3 position;
 layout (location = 1) in vec4 color;
 layout (location = 2) in vec3 normal;
+layout (location = 3) in vec2 uv;
 
-layout (set = 0, binding = 0) uniform ViewProjection
+layout (set = 0, binding = 0) uniform ModelViewProjection
 {
-    mat4 model;
+	mat4 model;
 	mat4 view;
 	mat4 projection;
 } ubo;
 
 layout (location = 0) out vec3 outNormal;
-layout (location = 1) out vec3 outColor;
-layout (location = 2) out vec3 outWorldPos;
-
-out gl_PerVertex
-{
-	vec4 gl_Position;
-};
+layout (location = 1) out vec2 outUV;
+layout (location = 2) out vec3 outColor;
+layout (location = 3) out vec3 outPos;
 
 void main()
 {
 	gl_Position = ubo.projection * ubo.view * ubo.model * vec4(position, 1.0);
 
-	// Vertex position in world space
-	outWorldPos = vec3(ubo.model * vec4(position, 1.0));
-	// GL to Vulkan coord space
-	outWorldPos.y = -outWorldPos.y;
+	outUV = uv;
 
-	// Normal in world space
-	mat3 mNormal = transpose(inverse(mat3(ubo.model)));
-	outNormal = mNormal * normalize(normal);
+	// Vertex position in view space
+	outPos = vec3(ubo.view * ubo.model * vec4(position, 1.0));
 
-	// Currently just vertex color
-	outColor = vec3(color);
+	// Normal in view space
+	mat3 normalMatrix = transpose(inverse(mat3(ubo.view * ubo.model)));
+	outNormal = normalMatrix * normal;
+
+	outColor = color.rgb;
 }
 "
     }
@@ -51,38 +47,38 @@ pub mod fs_gbuffer {
 #version 450
 
 layout (location = 0) in vec3 inNormal;
-layout (location = 1) in vec3 inColor;
-layout (location = 2) in vec3 inWorldPos;
+layout (location = 1) in vec2 inUV;
+layout (location = 2) in vec3 inColor;
+layout (location = 3) in vec3 inPos;
 
 layout (location = 0) out vec4 outColor;
 layout (location = 1) out vec4 outPosition;
 layout (location = 2) out vec4 outNormal;
 layout (location = 3) out vec4 outAlbedo;
 
-/* layout (constant_id = 0) */ const float NEAR_PLANE = 0.1f;
-/* layout (constant_id = 1) */ const float FAR_PLANE = 256.0f;
+layout (set = 0, binding = 0) uniform ModelViewProjection
+{
+	mat4 model;
+	mat4 view;
+	mat4 projection;
+} ubo;
+
+// layout (set = 1, binding = 0) uniform sampler2D samplerColormap;
 
 float linearDepth(float depth)
 {
+    float nearPlane = 0.1f;
+    float farPlane = 64.0f;
 	float z = depth * 2.0f - 1.0f;
-	return (2.0f * NEAR_PLANE * FAR_PLANE) / (FAR_PLANE + NEAR_PLANE - z * (FAR_PLANE - NEAR_PLANE));
+	return (2.0f * nearPlane * farPlane) / (farPlane + nearPlane - z * (farPlane - nearPlane));
 }
 
 void main()
 {
-	outPosition = vec4(inWorldPos, 1.0);
-
-	vec3 N = normalize(inNormal);
-	N.y = -N.y;
-	outNormal = vec4(N, 1.0);
-
-	outAlbedo.rgb = inColor;
-
-	// Store linearized depth in alpha component
-	outAlbedo.a = linearDepth(gl_FragCoord.z);
-
-	// Write color attachments to avoid undefined behaviour (validation error)
-	outColor = vec4(0.0);
+    outColor = vec4(1.0);
+	outPosition = vec4(inPos, linearDepth(gl_FragCoord.z));
+	outNormal = vec4(normalize(inNormal) * 0.5 + 0.5, 1.0);
+	outAlbedo = /* texture(samplerColormap, inUV) */ vec4(inColor, 1.0);
 }
 "
     }
@@ -116,40 +112,67 @@ pub mod fs_ssao {
             src: "
 #version 450
 
-// TODO: input_attachment_index = 1?
-layout (input_attachment_index = 0, binding = 1) uniform subpassInput samplerPositionDepth;
-layout (binding = 2) uniform sampler2D samplerTexture;
+layout (binding = 0) uniform sampler2D samplerPositionDepth;
+layout (binding = 1) uniform sampler2D samplerNormal;
+layout (binding = 2) uniform sampler2D ssaoNoise;
 
-layout (location = 0) in vec3 inColor;
-layout (location = 1) in vec2 inUV;
+layout (constant_id = 0) const int SSAO_KERNEL_SIZE = 64;
+layout (constant_id = 1) const float SSAO_RADIUS = 0.5;
 
-layout (location = 0) out vec4 outColor;
-
-/*layout (constant_id = 0)*/ const float NEAR_PLANE = 0.1f;
-/*layout (constant_id = 1)*/ const float FAR_PLANE = 256.0f;
-
-float linearDepth(float depth)
+layout (binding = 3) uniform SsaoKernel
 {
-	float z = depth * 2.0f - 1.0f;
-	return (2.0f * NEAR_PLANE * FAR_PLANE) / (FAR_PLANE + NEAR_PLANE - z * (FAR_PLANE - NEAR_PLANE));
-}
+	vec4 samples[64];
+} uboSSAOKernel;
 
-void main ()
+layout (binding = 4) uniform Projection
 {
-	// Sample depth from deferred depth buffer and discard if obscured
-	float depth = subpassLoad(samplerPositionDepth).a;
+	mat4 projection;
+} ubo;
 
-	// Save the sampled texture color before discarding.
-	// This is to avoid implicit derivatives in non-uniform control flow.
+layout (location = 0) in vec2 inUV;
 
-	vec4 sampledColor = texture(samplerTexture, inUV);
+layout (location = 0) out float outFragColor;
 
-	if ((depth != 0.0) && (linearDepth(gl_FragCoord.z) > depth))
+void main()
+{
+	// Get G-Buffer values
+	vec3 fragPos = texture(samplerPositionDepth, inUV).rgb;
+	vec3 normal = normalize(texture(samplerNormal, inUV).rgb * 2.0 - 1.0);
+
+	// Get a random vector using a noise lookup
+	ivec2 texDim = textureSize(samplerPositionDepth, 0);
+	ivec2 noiseDim = textureSize(ssaoNoise, 0);
+	const vec2 noiseUV = vec2(float(texDim.x)/float(noiseDim.x), float(texDim.y)/(noiseDim.y)) * inUV;
+	vec3 randomVec = texture(ssaoNoise, noiseUV).xyz * 2.0 - 1.0;
+
+	// Create TBN matrix
+	vec3 tangent = normalize(randomVec - normal * dot(randomVec, normal));
+	vec3 bitangent = cross(tangent, normal);
+	mat3 TBN = mat3(tangent, bitangent, normal);
+
+	// Calculate occlusion value
+	float occlusion = 0.0f;
+	// remove banding
+	const float bias = 0.025f;
+	for(int i = 0; i < SSAO_KERNEL_SIZE; i++)
 	{
-		discard;
-	};
+		vec3 samplePos = TBN * uboSSAOKernel.samples[i].xyz; // from tangent to view-space
+		samplePos = fragPos + samplePos * SSAO_RADIUS;
 
-	outColor = sampledColor;
+		// project
+		vec4 offset = vec4(samplePos, 1.0f);
+		offset = ubo.projection * offset;       // from view to clip-space
+		offset.xyz /= offset.w;                 // perspective divide
+		offset.xyz = offset.xyz * 0.5f + 0.5f;  // transform to range 0.0..=1.0
+
+		float sampleDepth = texture(samplerPositionDepth, offset.xy).z;
+
+		float rangeCheck = smoothstep(0.0f, 1.0f, SSAO_RADIUS / abs(fragPos.z - sampleDepth));
+		occlusion += (sampleDepth >= samplePos.z + bias ? 1.0f : 0.0f) * rangeCheck;
+	}
+	occlusion = 1.0 - (occlusion / float(SSAO_KERNEL_SIZE));
+
+	outFragColor = occlusion;
 }
 "
     }
@@ -166,11 +189,11 @@ layout (binding = 1) uniform sampler2D samplerNormal;
 layout (binding = 2) uniform sampler2D samplerAlbedo;
 layout (binding = 3) uniform sampler2D samplerSSAO;
 layout (binding = 4) uniform sampler2D samplerSSAOBlur;
-layout (binding = 5) uniform UBO
+layout (binding = 5) uniform SsaoSettings
 {
 	int ssao;
-	int ssaoOnly;
-	int ssaoBlur;
+	int ssao_only;
+	int ssao_blur;
 } uboParams;
 
 layout (location = 0) in vec2 inUV;
@@ -183,13 +206,13 @@ void main()
 	vec3 normal = normalize(texture(samplerNormal, inUV).rgb * 2.0 - 1.0);
 	vec4 albedo = texture(samplerAlbedo, inUV);
 
-	float ssao = (uboParams.ssaoBlur == 1) ? texture(samplerSSAOBlur, inUV).r : texture(samplerSSAO, inUV).r;
+	float ssao = (uboParams.ssao_blur == 1) ? texture(samplerSSAOBlur, inUV).r : texture(samplerSSAO, inUV).r;
 
-	vec3 lightPos = vec3(0.5);
+	vec3 lightPos = vec3(30, -20.0, -30);
 	vec3 L = normalize(lightPos - fragPos);
-	float NdotL = max(1.0, dot(normal, L));
+	float NdotL = max(1.5, dot(normal, L));
 
-	if (uboParams.ssaoOnly == 1)
+	if (uboParams.ssao_only == 1)
 	{
 		outFragColor.rgb = ssao.rrr;
 	}
@@ -201,8 +224,7 @@ void main()
 		{
 			outFragColor.rgb = ssao.rrr;
 
-			if (uboParams.ssaoOnly != 1)
-				outFragColor.rgb *= baseColor;
+			outFragColor.rgb *= baseColor;
 		}
 		else
 		{
