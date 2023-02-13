@@ -1,3 +1,8 @@
+mod shaders;
+mod gbuffer_pipeline;
+mod ssao_pipeline;
+mod composition_pipeline;
+
 use std::collections::btree_map::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,8 +27,7 @@ use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveT
 use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode};
-use vulkano::sampler::Filter::Nearest;
+use vulkano::sampler::{Filter, Sampler, SamplerCreateInfo, SamplerMipmapMode};
 use vulkano::swapchain::{
     AcquireError, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo,
 };
@@ -35,283 +39,25 @@ use winit::window::Window;
 use vulkano_examples::{App, gltf_loader};
 use vulkano_examples::camera::{Camera, CameraType};
 use vulkano_examples::gltf_loader::Scene;
+use crate::composition_pipeline::CompositionPass;
+use crate::gbuffer_pipeline::GbufferPass;
 
-use crate::shaders::{fs_composition, fs_gbuffer, fs_ssao, vs_fullscreen, vs_gbuffer};
-use crate::shaders::fs_composition::ty::SsaoSettings;
-use crate::shaders::fs_gbuffer::ty::ModelViewProjection;
-use crate::shaders::fs_ssao::ty::{Projection, SsaoKernel};
-
-mod shaders;
-
-const SSAO_NOISE_DIM: usize = 4;
+use crate::shaders::{fs_composition, vs_fullscreen};
+use crate::shaders::fs_ssao::ty::Projection;
+use crate::ssao_pipeline::SsaoPass;
 
 struct Example {
-    ssao_settings: Subbuffer<SsaoSettings>,
-    ssao_kernel: Subbuffer<SsaoKernel>,
-    ssao_noise: Arc<ImageView<ImmutableImage>>,
+    gbuffer_pass: GbufferPass,
+    ssao_pass: SsaoPass,
+    composition_pass: CompositionPass,
 
-    composition_scene: Scene,
-    view_projection_set: Arc<PersistentDescriptorSet>,
-
-    gbuffer_framebuffers: Vec<Arc<Framebuffer>>,
-    ssao_framebuffers: Vec<Arc<Framebuffer>>,
-    composition_framebuffers: Vec<Arc<Framebuffer>>,
-
-    sampler: Arc<Sampler>,
-}
-
-pub fn create_ssao_kernel() -> SsaoKernel {
-    let lerp = |a: f32, b: f32, f: f32|
-        {
-            a + f * (b - a)
-        };
-
-    let mut rnd = rand::thread_rng();
-
-    // Sample kernel
-    let mut samples = [Vec4::identity().data.0[0]; 64];
-    for i in 0..64
-    {
-        // Generate random point in hemisphere in z direction
-        let mut sample = vec4(
-            rnd.gen_range(-1.0..=1.0),
-            rnd.gen_range(-1.0..=1.0),
-            rnd.gen_range(0.0..=1.0),
-            0.0);
-        sample = normalize(&sample);
-        sample *= rnd.gen_range(0.0..=1.0);
-        let mut scale = i as f32 / 64.0;
-        scale = lerp(0.1, 1.0, scale * scale);
-        sample *= scale;
-        sample.w = 0.0;
-        samples[i] = sample.data.0[0];
-    }
-
-    SsaoKernel {
-        samples,
-    }
-}
-
-pub fn create_noise_texture(app: &App) -> Arc<ImmutableImage> {
-    let mut rnd = rand::thread_rng();
-
-    let mut ssao_noise = [[0.0, 0.0, 0.0, 0.0]; SSAO_NOISE_DIM * SSAO_NOISE_DIM];
-    for i in 0..ssao_noise.len()
-    {
-        ssao_noise[i] = vec4(rnd.gen_range(0.0..=1.0) as f32, rnd.gen_range(0.0..=1.0) as f32, 0.0, 0.0).data.0[0];
-    }
-
-    app.load_texture(bytemuck::cast_slice(&ssao_noise), SSAO_NOISE_DIM as u32, SSAO_NOISE_DIM as u32, 1, Format::R32G32B32A32_SFLOAT)
-}
-
-
-const DEPTH_FORMAT: Format = Format::D32_SFLOAT;
-const POSITION_FORMAT: Format = Format::R16G16B16A16_SFLOAT;
-const NORMAL_FORMAT: Format = Format::R8G8B8A8_UNORM;
-const ALBEDO_FORMAT: Format = Format::R8G8B8A8_UNORM;
-
-fn get_gbuffer_framebuffers(memory_allocator: &Arc<StandardMemoryAllocator>, images: &[Arc<SwapchainImage>], render_pass: &Arc<RenderPass>) -> Vec<Arc<Framebuffer>> {
-    images
-        .iter()
-        .map(|image| {
-            let color = ImageView::new_default(AttachmentImage::with_usage(
-                memory_allocator,
-                image.dimensions().width_height(), image.format(), ImageUsage::SAMPLED | image.usage()).unwrap()).unwrap();
-            let position = ImageView::new_default(
-                AttachmentImage::with_usage(memory_allocator,
-                                            image.dimensions().width_height(), POSITION_FORMAT, ImageUsage::SAMPLED).unwrap()
-            ).unwrap();
-            let normal = ImageView::new_default(
-                AttachmentImage::with_usage(memory_allocator,
-                                            image.dimensions().width_height(), NORMAL_FORMAT, ImageUsage::SAMPLED).unwrap()
-            ).unwrap();
-            let albedo = ImageView::new_default(
-                AttachmentImage::with_usage(memory_allocator,
-                                            image.dimensions().width_height(), ALBEDO_FORMAT, ImageUsage::SAMPLED).unwrap()
-            ).unwrap();
-            let depth_buffer = ImageView::new_default(
-                AttachmentImage::transient(memory_allocator,
-                                           image.dimensions().width_height(), DEPTH_FORMAT).unwrap()
-            ).unwrap();
-
-            Framebuffer::new(
-                render_pass.clone(),
-                FramebufferCreateInfo {
-                    attachments: vec![color, position, normal, albedo, depth_buffer],
-                    ..Default::default()
-                },
-            )
-                .unwrap()
-        })
-        .collect::<Vec<_>>()
-}
-
-fn get_fresh_framebuffer(memory_allocator: &Arc<StandardMemoryAllocator>, images: &[Arc<SwapchainImage>], render_pass: &Arc<RenderPass>) -> Vec<Arc<Framebuffer>> {
-    images
-        .iter()
-        .map(|image| {
-            let color = ImageView::new_default(AttachmentImage::with_usage(
-                memory_allocator,
-                image.dimensions().width_height(), image.format(), ImageUsage::SAMPLED | image.usage()).unwrap()).unwrap();
-
-            Framebuffer::new(
-                render_pass.clone(),
-                FramebufferCreateInfo {
-                    attachments: vec![color],
-                    ..Default::default()
-                },
-            )
-                .unwrap()
-        })
-        .collect::<Vec<_>>()
-}
-
-fn get_final_framebuffer(images: &[Arc<SwapchainImage>], render_pass: &Arc<RenderPass>) -> Vec<Arc<Framebuffer>> {
-    images
-        .iter()
-        .map(|image| {
-            let color = ImageView::new_default(image.clone()).unwrap();
-
-            Framebuffer::new(
-                render_pass.clone(),
-                FramebufferCreateInfo {
-                    attachments: vec![color],
-                    ..Default::default()
-                },
-            )
-                .unwrap()
-        })
-        .collect::<Vec<_>>()
-}
-
-fn get_pipeline_gbuffer(
-    device: Arc<Device>,
-    render_pass: Arc<RenderPass>,
-    viewport: Viewport,
-) -> Arc<GraphicsPipeline> {
-    let vs = vs_gbuffer::load(device.clone()).unwrap();
-    let fs = fs_gbuffer::load(device.clone()).unwrap();
-
-    GraphicsPipeline::start()
-        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
-        .vertex_shader(vs.entry_point("main").unwrap(), ())
-        .input_assembly_state(InputAssemblyState::new().topology(PrimitiveTopology::TriangleList))
-        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
-        .fragment_shader(fs.entry_point("main").unwrap(), ())
-        .depth_stencil_state(DepthStencilState::simple_depth_test())
-        .render_pass(Subpass::from(render_pass, 0).unwrap())
-        .build(device).unwrap()
-}
-
-fn get_pipeline_ssao(
-    app: &App,
-    viewport: Viewport,
-) -> Arc<GraphicsPipeline> {
-    let vs = vs_fullscreen::load(app.device.clone()).unwrap();
-    let fs = fs_ssao::load(app.device.clone()).unwrap();
-    let render_pass = get_simple_render_pass(app);
-    GraphicsPipeline::start()
-        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
-        .vertex_shader(vs.entry_point("main").unwrap(), ())
-        .input_assembly_state(InputAssemblyState::new().topology(PrimitiveTopology::TriangleList))
-        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
-        .fragment_shader(fs.entry_point("main").unwrap(), fs_ssao::SpecializationConstants {
-            SSAO_RADIUS: 0.3,
-            SSAO_KERNEL_SIZE: 64,
-        })
-        .depth_stencil_state(DepthStencilState::simple_depth_test())
-        .render_pass(Subpass::from(render_pass, 0).unwrap())
-        .build(app.device.clone())
-        .unwrap()
-}
-
-fn get_pipeline_composition(
-    app: &App,
-    viewport: Viewport,
-) -> Arc<GraphicsPipeline> {
-    let vs = vs_fullscreen::load(app.device.clone()).unwrap();
-    let fs = fs_composition::load(app.device.clone()).unwrap();
-    let render_pass = get_simple_render_pass(app);
-    GraphicsPipeline::start()
-        .vertex_input_state(gltf_loader::GltfVertex::per_vertex())
-        .vertex_shader(vs.entry_point("main").unwrap(), ())
-        .input_assembly_state(InputAssemblyState::new())
-        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
-        .fragment_shader(fs.entry_point("main").unwrap(), ())
-        .render_pass(Subpass::from(render_pass, 0).unwrap())
-        .build(app.device.clone())
-        .unwrap()
-}
-
-fn get_simple_render_pass(app: &App) -> Arc<RenderPass> {
-    vulkano::ordered_passes_renderpass!(
-        app.device.clone(),
-        attachments: {
-            color: {
-                load: Clear,
-                store: Store,
-                format: app.swapchain.image_format(),
-                samples: 1,
-            }
-        },
-        passes: [
-        {
-            color: [color],
-            depth_stencil: {},
-            input: []
-        }]
-    ).unwrap()
+    scene: Scene,
 }
 
 pub fn main() {
     let (mut app, event_loop) = App::new("SSAO");
 
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(app.device.clone()));
-
-    let color_format = app.swapchain.image_format();
-
-    let render_pass = vulkano::ordered_passes_renderpass!(
-        app.device.clone(),
-        attachments: {
-            color: {
-                load: Clear,
-                store: Store,
-                format: color_format,
-                samples: 1,
-            },
-            position: {
-                load: Clear,
-                store: Store, // store for later use in subsequent render passes
-                format: POSITION_FORMAT,
-                samples: 1,
-            },
-            normal: {
-                load: Clear,
-                store: Store,
-                format: NORMAL_FORMAT,
-                samples: 1,
-            },
-            albedo: {
-                load: Clear,
-                store: Store,
-                format: ALBEDO_FORMAT,
-                samples: 1,
-            },
-            depth: {
-                load: Clear,
-                store: Store,
-                format: DEPTH_FORMAT,
-                samples: 1,
-            }
-        },
-        passes: [
-        {// gbuffer
-            color: [color, position, normal, albedo],
-            depth_stencil: {depth},
-            input: []
-        }]
-    )
-        .unwrap();
 
     let aspect_ratio =
         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
@@ -325,96 +71,17 @@ pub fn main() {
         depth_range: 0.0..1.0,
     };
 
-    // Create gbuffer pipeline
-    let mut pipeline_gbuffer = get_pipeline_gbuffer(
-        app.device.clone(),
-        render_pass.clone(),
-        viewport.clone(),
-    );
-
-    let view_projection_buffer = Buffer::from_data(
-        memory_allocator.as_ref(),
-        BufferAllocateInfo {
-            buffer_usage: BufferUsage::UNIFORM_BUFFER,
-            ..BufferAllocateInfo::default()
-        },
-        ModelViewProjection {
-            model: identity().data.0,
-            view: identity().data.0,
-            projection: identity().data.0,
-        },
-    ).unwrap();
-
-    let projection_buffer = Buffer::from_data(
-        memory_allocator.as_ref(),
-        BufferAllocateInfo {
-            buffer_usage: BufferUsage::UNIFORM_BUFFER,
-            ..BufferAllocateInfo::default()
-        },
-        Projection {
-            projection: identity().data.0,
-        },
-    ).unwrap();
-
-    let layout = pipeline_gbuffer.layout().set_layouts().get(0).unwrap();
-
-    let noise_texture = create_noise_texture(&app);
+    let gbuffer_pass = GbufferPass::new(&app, &viewport);
+    let ssao_pass = SsaoPass::new(&app, &viewport, &gbuffer_pass);
+    let composition_pass = CompositionPass::new(&app, &viewport, &gbuffer_pass, &ssao_pass);
 
     let mut example = Example {
-        ssao_settings: Buffer::from_data(
-            memory_allocator.as_ref(),
-            BufferAllocateInfo {
-                buffer_usage: BufferUsage::UNIFORM_BUFFER,
-                ..BufferAllocateInfo::default()
-            },
-            SsaoSettings {
-                ssao: 1,
-                ssao_blur: 0,
-                ssao_only: 1,
-            },
-        ).unwrap(),
-        ssao_kernel: Buffer::from_data(
-            memory_allocator.as_ref(),
-            BufferAllocateInfo {
-                buffer_usage: BufferUsage::UNIFORM_BUFFER,
-                ..BufferAllocateInfo::default()
-            },
-            create_ssao_kernel(),
-        ).unwrap(),
-        ssao_noise: ImageView::new(noise_texture.clone(), ImageViewCreateInfo {
-            usage: ImageUsage::SAMPLED,
-            ..ImageViewCreateInfo::from_image(&noise_texture)
-        }).unwrap(),
-        view_projection_set: PersistentDescriptorSet::new(
-            &app.allocator_descriptor_set,
-            layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, view_projection_buffer.clone()),
-            ],
-        ).unwrap(),
-        composition_scene: scene,
-        sampler: Sampler::new(app.device.clone(), SamplerCreateInfo {
-            min_filter: Filter::Nearest,
-            mag_filter: Filter::Nearest,
-            mipmap_mode: SamplerMipmapMode::Nearest,
-            ..SamplerCreateInfo::default()
-        }).unwrap(),
+        gbuffer_pass,
+        ssao_pass,
+        composition_pass,
 
-        gbuffer_framebuffers: get_gbuffer_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass),
-        ssao_framebuffers: get_fresh_framebuffer(&app.allocator_memory, &app.swapchain_images, &get_simple_render_pass(&app)),
-        composition_framebuffers: get_final_framebuffer(&app.swapchain_images, &get_simple_render_pass(&app)),
+        scene,
     };
-
-    // Create ssao pipeline
-    let mut pipeline_ssao = get_pipeline_ssao(&app, viewport.clone());
-    let layout_ssao = pipeline_ssao.layout().set_layouts().get(0).unwrap();
-    let ssao_sets = create_ssao_sets(&app.device, layout_ssao, &app.allocator_descriptor_set, &example, &projection_buffer);
-
-    // Create composition pipeline
-    let mut pipeline_composition = get_pipeline_composition(&app, viewport.clone());
-
-    let layout_composition = pipeline_composition.layout().set_layouts().get(0).unwrap();
-    let composition_sets = create_composition_sets(layout_composition, &app.allocator_descriptor_set, &example);
 
     let mut recreate_swapchain = true;
 
@@ -431,7 +98,7 @@ pub fn main() {
 
     let mut previous_frame_end = Some(sync::now(app.device.clone()).boxed());
 
-    let mut command_buffers = get_command_buffers(&app, &pipeline_gbuffer, &pipeline_ssao, &pipeline_composition, &example, &ssao_sets, &composition_sets);
+    let mut command_buffers = get_command_buffers(&app, &example);
 
     event_loop.run(move |event, _, control_flow| {
         camera.handle_input(&event);
@@ -485,41 +152,27 @@ pub fn main() {
                         app.swapchain.image_extent()[0] as f32 / app.swapchain.image_extent()[1] as f32;
                     camera.set_perspective(aspect_ratio, f32::to_radians(60.0), 0.01, 512.0);
 
-                    // swapchain recreation invalidated framebuffers, recreate them:
-                    example.gbuffer_framebuffers = get_gbuffer_framebuffers(&memory_allocator, &app.swapchain_images, &render_pass);
-                    example.ssao_framebuffers = get_fresh_framebuffer(&app.allocator_memory, &app.swapchain_images, &get_simple_render_pass(&app));
-                    example.composition_framebuffers = get_final_framebuffer(&app.swapchain_images, &get_simple_render_pass(&app));
-
                     viewport.dimensions = window.inner_size().into();
-                    pipeline_gbuffer = get_pipeline_gbuffer(
-                        app.device.clone(),
-                        render_pass.clone(),
-                        viewport.clone(),
-                    );
 
-                    pipeline_ssao = get_pipeline_ssao(&app, viewport.clone());
+                    // swapchain recreation invalidated framebuffers, descriptors..., recreate them:
+                    example.gbuffer_pass.recreate_resources(&app, &viewport);
+                    example.ssao_pass.recreate_resources(&app, &viewport, &example.gbuffer_pass);
+                    example.composition_pass.recreate_resources(&app, &viewport, &example.gbuffer_pass, &example.ssao_pass);
 
-                    let layout_ssao = pipeline_ssao.layout().set_layouts().get(0).unwrap();
-                    let ssao_sets = create_ssao_sets(&app.device, layout_ssao, &app.allocator_descriptor_set, &example, &projection_buffer);
-
-                    pipeline_composition = get_pipeline_composition(&app, viewport.clone());
-                    let layout_composition = pipeline_composition.layout().set_layouts().get(0).unwrap();
-                    let composition_sets = create_composition_sets(layout_composition, &app.allocator_descriptor_set, &example);
-
-                    command_buffers = get_command_buffers(&app, &pipeline_gbuffer, &pipeline_ssao, &pipeline_composition, &example, &ssao_sets, &composition_sets);
+                    command_buffers = get_command_buffers(&app, &example);
 
                     recreate_swapchain = false;
                 }
 
                 {
-                    let view_projection = view_projection_buffer.write();
+                    let view_projection = example.gbuffer_pass.view_projection_buffer.write();
 
                     if let Ok(mut view_projection) = view_projection {
                         view_projection.view = camera.get_view_matrix().data.0;
                         view_projection.projection = camera.get_perspective_matrix().data.0;
                     }
 
-                    let projection = projection_buffer.write();
+                    let projection = example.ssao_pass.projection_buffer.write();
                     if let Ok(mut projection) = projection {
                         projection.projection = camera.get_perspective_matrix().data.0;
                     }
@@ -573,61 +226,14 @@ pub fn main() {
     });
 }
 
-fn create_ssao_sets(device: &Arc<Device>, layout_ssao: &Arc<DescriptorSetLayout>, descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>, example: &Example, projection: &Subbuffer<Projection>) ->
-Vec<Arc<PersistentDescriptorSet>> {
-    let noise_sampler = Sampler::new(device.clone(), SamplerCreateInfo {
-        min_filter: Nearest,
-        mag_filter: Nearest,
-        address_mode: [SamplerAddressMode::Repeat; 3],
-        ..SamplerCreateInfo::default()
-    }).unwrap();
-
-    example.gbuffer_framebuffers.iter().enumerate().map(|(i, f): (usize, &Arc<Framebuffer>)| {
-        PersistentDescriptorSet::new(
-            descriptor_set_allocator,
-            layout_ssao.clone(),
-            [
-                WriteDescriptorSet::image_view_sampler(0, f.attachments()[1].clone(), example.sampler.clone()), // position
-                WriteDescriptorSet::image_view_sampler(1, f.attachments()[2].clone(), example.sampler.clone()), // normal
-                WriteDescriptorSet::image_view_sampler(2, example.ssao_noise.clone(), noise_sampler.clone()), // ssao noise
-                WriteDescriptorSet::buffer(3, example.ssao_kernel.clone()),
-                WriteDescriptorSet::buffer(4, projection.clone()),
-            ]).unwrap()
-    }).collect()
-}
-
-fn create_composition_sets(layout_composition: &Arc<DescriptorSetLayout>, descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>, example: &Example) ->
-Vec<Arc<PersistentDescriptorSet>> {
-    // unfortunately we need a separate descriptor set for every framebuffer, because the
-    // resulting image can be different for each renderpass and each framebuffer.
-    example.gbuffer_framebuffers.iter().enumerate().map(|(i, f): (usize, &Arc<Framebuffer>)| {
-        PersistentDescriptorSet::new(
-            descriptor_set_allocator,
-            layout_composition.clone(),
-            [
-                WriteDescriptorSet::image_view_sampler(0, f.attachments()[1].clone(), example.sampler.clone()), // position
-                WriteDescriptorSet::image_view_sampler(1, f.attachments()[2].clone(), example.sampler.clone()), // normal
-                WriteDescriptorSet::image_view_sampler(2, f.attachments()[3].clone(), example.sampler.clone()), // albedo
-                WriteDescriptorSet::image_view_sampler(3, example.ssao_framebuffers[i].attachments()[0].clone(), example.sampler.clone()), // ssao
-                WriteDescriptorSet::image_view_sampler(4, f.attachments()[3].clone(), example.sampler.clone()), // TODO: ssao blur
-                WriteDescriptorSet::buffer(5, example.ssao_settings.clone()),
-            ]).unwrap()
-    }).collect()
-}
-
 fn get_command_buffers(
     app: &App,
-    pipeline_gbuffer: &Arc<GraphicsPipeline>,
-    pipeline_ssao: &Arc<GraphicsPipeline>,
-    pipeline_composition: &Arc<GraphicsPipeline>,
     example: &Example,
-    ssao_sets: &[Arc<PersistentDescriptorSet>],
-    composition_sets: &[Arc<PersistentDescriptorSet>],
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
-    example.gbuffer_framebuffers
+    example.gbuffer_pass.get_framebuffers()
         .iter()
-        .zip(&example.ssao_framebuffers)
-        .zip(&example.composition_framebuffers)
+        .zip(&example.ssao_pass.get_framebuffers())
+        .zip(&example.composition_pass.get_framebuffers())
         .enumerate()
         .map(|(i, ((gbuffer_framebuffer, ssao_framebuffer), composition_framebuffer)): (_, ((&Arc<Framebuffer>, &Arc<Framebuffer>), _))| {
             let mut builder = AutoCommandBufferBuilder::primary(
@@ -652,9 +258,11 @@ fn get_command_buffers(
                     SubpassContents::Inline,
                 ).unwrap();
 
-            builder.bind_pipeline_graphics(pipeline_gbuffer.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_gbuffer.layout().clone(), 0, vec![example.view_projection_set.clone()]);
-            example.composition_scene.draw(&mut builder);
+            builder.bind_pipeline_graphics(example.gbuffer_pass.get_graphics_pipeline())
+                .bind_descriptor_sets(PipelineBindPoint::Graphics,
+                                      example.gbuffer_pass.get_graphics_pipeline().layout().clone(),
+                                      0, vec![example.gbuffer_pass.view_projection_set[0].clone()]);
+            example.scene.draw(&mut builder);
             builder.end_render_pass().unwrap();
 
             // ssao pass
@@ -670,8 +278,10 @@ fn get_command_buffers(
                 ).unwrap();
 
             builder
-                .bind_pipeline_graphics(pipeline_ssao.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_ssao.layout().clone(), 0, vec![ssao_sets[i].clone()])
+                .bind_pipeline_graphics(example.ssao_pass.get_graphics_pipeline())
+                .bind_descriptor_sets(PipelineBindPoint::Graphics,
+                                      example.ssao_pass.get_graphics_pipeline().layout().clone(),
+                                      0, vec![example.ssao_pass.ssao_set.as_ref().unwrap()[i].clone()])
                 .draw(3, 1, 0, 0).unwrap();
 
             builder
@@ -691,8 +301,10 @@ fn get_command_buffers(
                 ).unwrap();
 
             builder
-                .bind_pipeline_graphics(pipeline_composition.clone())
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, pipeline_composition.layout().clone(), 0, vec![composition_sets[i].clone()])
+                .bind_pipeline_graphics(example.composition_pass.get_graphics_pipeline())
+                .bind_descriptor_sets(PipelineBindPoint::Graphics,
+                                      example.composition_pass.get_graphics_pipeline().layout().clone(),
+                                      0, vec![example.composition_pass.composition_set.as_ref().unwrap()[i].clone()])
                 .draw(3, 1, 0, 0).unwrap();
 
             builder

@@ -27,7 +27,7 @@ void main()
 
 	outUV = uv;
 
-	// Vertex position in view space
+	// Vertex position in view space(!)
 	outPos = vec3(ubo.view * ubo.model * vec4(position, 1.0));
 
 	// Normal in view space
@@ -65,18 +65,10 @@ layout (set = 0, binding = 0) uniform ModelViewProjection
 
 // layout (set = 1, binding = 0) uniform sampler2D samplerColormap;
 
-float linearDepth(float depth)
-{
-    float nearPlane = 0.1f;
-    float farPlane = 64.0f;
-	float z = depth * 2.0f - 1.0f;
-	return (2.0f * nearPlane * farPlane) / (farPlane + nearPlane - z * (farPlane - nearPlane));
-}
-
 void main()
 {
     outColor = vec4(1.0);
-	outPosition = vec4(inPos, linearDepth(gl_FragCoord.z));
+	outPosition = vec4(inPos, 1.0);
 	outNormal = vec4(normalize(inNormal) * 0.5 + 0.5, 1.0);
 	outAlbedo = /* texture(samplerColormap, inUV) */ vec4(inColor, 1.0);
 }
@@ -112,7 +104,7 @@ pub mod fs_ssao {
             src: "
 #version 450
 
-layout (binding = 0) uniform sampler2D samplerPositionDepth;
+layout (binding = 0) uniform sampler2D samplerPosition;
 layout (binding = 1) uniform sampler2D samplerNormal;
 layout (binding = 2) uniform sampler2D ssaoNoise;
 
@@ -136,11 +128,11 @@ layout (location = 0) out float outFragColor;
 void main()
 {
 	// Get G-Buffer values
-	vec3 fragPos = texture(samplerPositionDepth, inUV).rgb;
+	vec3 fragPos = texture(samplerPosition, inUV).rgb;
 	vec3 normal = normalize(texture(samplerNormal, inUV).rgb * 2.0 - 1.0);
 
 	// Get a random vector using a noise lookup
-	ivec2 texDim = textureSize(samplerPositionDepth, 0);
+	ivec2 texDim = textureSize(samplerPosition, 0);
 	ivec2 noiseDim = textureSize(ssaoNoise, 0);
 	const vec2 noiseUV = vec2(float(texDim.x)/float(noiseDim.x), float(texDim.y)/(noiseDim.y)) * inUV;
 	vec3 randomVec = texture(ssaoNoise, noiseUV).xyz * 2.0 - 1.0;
@@ -165,11 +157,12 @@ void main()
 		offset.xyz /= offset.w;                 // perspective divide
 		offset.xyz = offset.xyz * 0.5f + 0.5f;  // transform to range 0.0..=1.0
 
-		float sampleDepth = texture(samplerPositionDepth, offset.xy).z;
+		vec3 occluderPos = texture(samplerPosition, offset.xy).xyz;
 
-		float rangeCheck = smoothstep(0.0f, 1.0f, SSAO_RADIUS / abs(fragPos.z - sampleDepth));
-		occlusion += (sampleDepth >= samplePos.z + bias ? 1.0f : 0.0f) * rangeCheck;
+		float rangeCheck = smoothstep(0.0f, 1.0f, SSAO_RADIUS / abs(fragPos.z - occluderPos.z));
+		occlusion += (occluderPos.z >= samplePos.z + bias ? 1.0f : 0.0f) * rangeCheck;
 	}
+
 	occlusion = 1.0 - (occlusion / float(SSAO_KERNEL_SIZE));
 
 	outFragColor = occlusion;
