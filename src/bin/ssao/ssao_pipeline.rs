@@ -21,7 +21,7 @@ use vulkano_examples::{App, gltf_loader};
 
 use crate::gbuffer_pipeline::GbufferPass;
 use crate::shaders::{fs_ssao, vs_fullscreen};
-use crate::shaders::fs_composition::ty::SsaoSettings;
+
 use crate::shaders::fs_ssao::ty::{Projection, SsaoKernel};
 
 const SSAO_NOISE_DIM: usize = 4;
@@ -202,7 +202,7 @@ impl SsaoPass {
             ..SamplerCreateInfo::default()
         }).unwrap();
 
-        self.ssao_set = Some(gbuffer_pass.get_framebuffers().iter().enumerate().map(|(i, f): (usize, &Arc<Framebuffer>)| {
+        self.ssao_set = Some(gbuffer_pass.get_framebuffers().iter().enumerate().map(|(_i, f): (usize, &Arc<Framebuffer>)| {
             PersistentDescriptorSet::new(
                 &app.allocator_descriptor_set,
                 self.pipeline.layout().set_layouts()[0].clone(),

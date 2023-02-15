@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use nalgebra_glm::{Vec4, vec4};
+
 use vulkano::buffer::{Buffer, BufferAllocateInfo, BufferUsage, Subbuffer};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::device::Device;
-use vulkano::image::{ImageAccess, ImageUsage, ImmutableImage, SwapchainImage};
-use vulkano::image::view::{ImageView, ImageViewCreateInfo};
+use vulkano::image::{SwapchainImage};
+use vulkano::image::view::{ImageView};
 use vulkano::pipeline::{GraphicsPipeline, Pipeline};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::vertex_input::Vertex;

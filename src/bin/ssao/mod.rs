@@ -3,31 +3,18 @@ mod gbuffer_pipeline;
 mod ssao_pipeline;
 mod composition_pipeline;
 
-use std::collections::btree_map::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bytemuck::{Zeroable};
-use nalgebra_glm::{identity, Mat4, normalize, vec3, Vec3, vec3_to_vec4, Vec4, vec4};
-use rand::Rng;
+use nalgebra_glm::{vec3};
+
 use vulkano::{swapchain, sync};
-use vulkano::buffer::{BufferUsage, Buffer, Subbuffer, BufferAllocateInfo};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyImageInfo, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
-use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorType};
-use vulkano::device::Device;
-use vulkano::format::{ClearValue, Format};
-use vulkano::image::{AttachmentImage, ImageAccess, ImageUsage, ImmutableImage, SwapchainImage};
-use vulkano::image::view::{ImageView, ImageViewCreateInfo};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
+use vulkano::format::{ClearValue};
 use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
-use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
-use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveTopology};
-use vulkano::pipeline::graphics::vertex_input::Vertex;
-use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
-use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::sampler::{Filter, Sampler, SamplerCreateInfo, SamplerMipmapMode};
+use vulkano::pipeline::{Pipeline, PipelineBindPoint};
+use vulkano::pipeline::graphics::viewport::{Viewport};
+use vulkano::render_pass::{Framebuffer};
 use vulkano::swapchain::{
     AcquireError, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo,
 };
@@ -36,14 +23,11 @@ use winit::event::{Event, WindowEvent};
 use winit::event_loop::ControlFlow;
 use winit::window::Window;
 
-use vulkano_examples::{App, gltf_loader};
+use vulkano_examples::{App};
 use vulkano_examples::camera::{Camera, CameraType};
 use vulkano_examples::gltf_loader::Scene;
 use crate::composition_pipeline::CompositionPass;
 use crate::gbuffer_pipeline::GbufferPass;
-
-use crate::shaders::{fs_composition, vs_fullscreen};
-use crate::shaders::fs_ssao::ty::Projection;
 use crate::ssao_pipeline::SsaoPass;
 
 struct Example {

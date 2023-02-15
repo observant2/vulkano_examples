@@ -1,7 +1,7 @@
 pub mod camera;
 pub mod gltf_loader;
 
-use std::io::{Cursor, Read};
+use std::io::{Cursor};
 use std::sync::Arc;
 use ktx::KtxInfo;
 
@@ -18,7 +18,7 @@ use vulkano::image::{AttachmentImage, ImageAccess, ImageDimensions, ImageUsage, 
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
-use vulkano::sampler::{Sampler, SamplerCreateInfo};
+
 use vulkano::swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo};
 use vulkano::sync::GpuFuture;
 use vulkano::VulkanLibrary;
